@@ -4,12 +4,19 @@ use std::{ffi::OsString, fs, path::Path};
 
 #[cfg(unix)]
 pub fn prepare_temporary(path: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(path)
         .context("cannot create private temporary directory")?;
+    validate_temporary(path)
+}
+
+/// Inspect existing scratch storage without creating or changing it.
+#[cfg(unix)]
+pub fn validate_temporary(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let metadata = fs::symlink_metadata(path)?;
     // Do not chmod an existing directory: it may be someone else's or a symlink.
     if !metadata.is_dir()
@@ -49,6 +56,11 @@ mod tests {
             0o755
         );
     }
+}
+
+#[cfg(not(unix))]
+pub fn validate_temporary(_path: &Path) -> Result<()> {
+    bail!("temporary directory validation is unsupported on this platform")
 }
 
 #[cfg(not(unix))]

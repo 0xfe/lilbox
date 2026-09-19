@@ -1,5 +1,64 @@
 # lilbox design and implementation plan
 
+## Example profile gallery — 2026-09-19
+
+1. Add annotated standalone and inherited profiles under examples/, with a guide
+   describing permissions, parent dependencies, and commands for trying/copying them.
+2. Link the gallery from README configuration sections and the profile reference;
+   include examples in release archives so those links work for release users.
+3. Check all examples with the CLI, verify documentation links and release contents,
+   and review the diff. No enforcement logic changes are needed.
+
+Completed: five annotated profiles plus a gallery guide, linked from README and
+the profile reference and included in release packaging. The examples and embedded
+default pass strict checking (six profiles, zero errors/warnings). Documentation
+links, TOML/dependencies, shell syntax, and whitespace checks pass. Rebuilt the
+native release, verified its checksum and exact example/document bytes, and ran
+version and strict configuration checks with its extracted executable.
+
+## Profile inheritance and configuration analysis — 2026-09-19
+
+Design: optional `extends = "NAME"` selects one parent from the same configuration
+directory, including the existing embedded-default fallback. Resolve root first;
+override explicit scalars, append/deduplicate lists, merge environment assignments
+by exact key. Apply schema defaults only after merging. Empty lists do not erase
+inherited restrictions. Single inheritance avoids ambiguous parent precedence.
+Reject invalid names, missing/malformed parents, cycles (including symlink aliases),
+and chains longer than 64 profiles. Protect every dependency's path/target.
+
+`lilbox check` analyzes all local TOML profiles plus default, or one dependency
+chain with `-p`. Aggregate independent errors and explain effective policy,
+dependency chains, shadowed grants, overlapping environment rules, and suspicious
+runtime/settings combinations. Errors fail; warnings are nonfatal unless
+`--strict` is supplied. Use terminal-aware color, honor NO_COLOR, and never show
+environment assignment values. Checking is read-only static analysis, not an
+enforcement or executable compatibility test.
+
+Phases (execute in order):
+1. Implement strict inheritance resolution and dependency path protection;
+   cover defaults, merging, missing parents, cycles, and aliases with tests.
+2. Implement shared configuration diagnostics and the check CLI; test aggregation,
+   field-specific messages, severity/exit status, and read-only operation.
+3. Update README, design/profile reference, and contributor instructions. Add
+   inherited-policy enforcement coverage; run `just verify`, inspect CLI output,
+   and review the diff.
+
+Completed all three phases:
+- Implemented inheritance with per-file schema validation, deferred defaults,
+  stable additive merging, bounded dependency resolution, and protection of all
+  source paths and symlink targets.
+- Implemented read-only check reports with aggregated errors, precedence warnings,
+  source chains, effective settings, terminal-aware colors, escaped control
+  characters, shared environment validation, and strict warning exit status.
+- Updated README, both reference documents, AGENTS.md, and the changelog.
+- `just verify` passes formatting, warning-free Clippy, 23 portable tests, and
+  11 actual macOS enforcement tests. New coverage includes inherited deny/drop
+  precedence, symlinked parent protection, fail-closed dependency errors, depth
+  limits, read-only checking, secret-value omission, and safe diagnostic output.
+- Both shipped profiles pass `lilbox --config-dir profiles check --strict` with
+  zero errors/warnings. Documentation links, TOML examples, fences, and
+  `git diff --check` pass. Other OS backends/CI were not executed locally.
+
 ## Goal
 
 Build a small, versioned Rust CLI that launches coding agents, arbitrary commands,

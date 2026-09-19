@@ -1,0 +1,416 @@
+//! Read-only configuration analysis. Diagnostics describe effective precedence;
+//! warnings never change the policy used by the launcher.
+use crate::{
+    backend, config,
+    config::{Mode, Network},
+    environment,
+    policy::{ContextPaths, Policy, resolve_path},
+};
+use anyhow::{Context, Result};
+use std::{collections::BTreeSet, fs, io::IsTerminal, path::Path};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug)]
+pub struct Finding {
+    pub severity: Severity,
+    pub profile: String,
+    pub message: String,
+}
+
+#[derive(Default, Debug)]
+pub struct Report {
+    pub findings: Vec<Finding>,
+    pub profiles: usize,
+}
+
+impl Report {
+    fn add(&mut self, severity: Severity, profile: &str, message: impl Into<String>) {
+        self.findings.push(Finding {
+            severity,
+            profile: profile.into(),
+            message: message.into(),
+        });
+    }
+
+    pub fn count(&self, severity: Severity) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == severity)
+            .count()
+    }
+
+    pub fn failed(&self, strict: bool) -> bool {
+        self.count(Severity::Error) > 0 || (strict && self.count(Severity::Warning) > 0)
+    }
+
+    pub fn print(&self) {
+        let color = std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none()
+            && std::env::var_os("TERM").is_none_or(|t| t != "dumb");
+        println!("Configuration check (static analysis; no sandbox launched)");
+        for finding in &self.findings {
+            let (glyph, label, code) = match finding.severity {
+                Severity::Info => ("✓", "info", "36"),
+                Severity::Warning => ("⚠", "warning", "33"),
+                Severity::Error => ("✗", "error", "31"),
+            };
+            let prefix = format!("{glyph} {label}");
+            let prefix = if color {
+                format!("\x1b[{code}m{prefix}\x1b[0m")
+            } else {
+                prefix
+            };
+            println!(
+                "{prefix} [{}] {}",
+                safe_text(&finding.profile),
+                safe_text(&finding.message)
+            );
+        }
+        println!(
+            "{} profile(s), {} error(s), {} warning(s)",
+            self.profiles,
+            self.count(Severity::Error),
+            self.count(Severity::Warning)
+        );
+    }
+}
+
+// Profile filenames and TOML strings are untrusted terminal input.
+fn safe_text(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
+    let mut report = Report::default();
+    let mut names = BTreeSet::new();
+    if let Some(name) = selected {
+        names.insert(name.to_owned());
+    } else {
+        names.insert("default".to_owned());
+        match fs::read_dir(&paths.config) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.context("cannot enumerate profile directory")?;
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "toml") {
+                        match path.file_stem().and_then(|s| s.to_str()) {
+                            Some(name) => {
+                                names.insert(name.to_owned());
+                            }
+                            None => report.add(
+                                Severity::Error,
+                                "directory",
+                                "profile filename is not valid UTF-8",
+                            ),
+                        }
+                    }
+                }
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && fs::symlink_metadata(&paths.config).is_err() => {}
+            Err(error) => return Err(error).context("cannot enumerate profile directory"),
+        }
+    }
+    for name in names {
+        report.profiles += 1;
+        let loaded = match config::load_resolved(&paths.config, &name) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                report.add(Severity::Error, &name, format!("{error:#}"));
+                continue;
+            }
+        };
+        report.add(
+            Severity::Info,
+            &name,
+            format!("inheritance (base → child): {}", loaded.chain.join(" → ")),
+        );
+        for source in &loaded.sources {
+            let embedded = if !source.exists() {
+                " (embedded default fallback)"
+            } else {
+                ""
+            };
+            report.add(
+                Severity::Info,
+                &name,
+                format!("source: {}{embedded}", source.display()),
+            );
+        }
+        let profile = &loaded.profile;
+        let mut paths_valid = true;
+        for (field, values) in [
+            ("filesystem.allow_read", &profile.filesystem.allow_read),
+            ("filesystem.allow_write", &profile.filesystem.allow_write),
+            ("filesystem.deny", &profile.filesystem.deny),
+        ] {
+            for (index, value) in values.iter().enumerate() {
+                if let Err(error) = resolve_path(value, paths) {
+                    paths_valid = false;
+                    report.add(
+                        Severity::Error,
+                        &name,
+                        format!("{field}[{index}]: {error:#}"),
+                    );
+                }
+            }
+        }
+        check_environment(&mut report, &name, profile);
+        if !paths_valid {
+            continue;
+        }
+        let policy = match loaded.policy(paths) {
+            Ok(policy) => policy,
+            Err(error) => {
+                report.add(
+                    Severity::Error,
+                    &name,
+                    format!("filesystem policy: {error:#}"),
+                );
+                continue;
+            }
+        };
+        report.add(Severity::Info, &name, format!(
+            "effective: mode={:?}, network={:?}, environment.inherit={}, protect_credentials={}, runtime.basic={}, temporary_directory={}",
+            profile.mode, policy.network, profile.environment.inherit.unwrap_or(profile.mode == Mode::Open),
+            profile.filesystem.protect_credentials, profile.runtime.basic, profile.runtime.temporary_directory));
+        check_filesystem(&mut report, &name, profile, paths, &policy);
+        if profile.mode == Mode::Closed {
+            if !profile.runtime.basic {
+                report.add(
+                    Severity::Warning,
+                    &name,
+                    "runtime.basic=false in closed mode: ordinary programs cannot execute",
+                );
+            }
+            if profile.environment.inherit == Some(true) {
+                report.add(Severity::Warning, &name, "closed mode with environment.inherit=true: non-sensitive host variables are inherited; changing mode does not reset inherited settings");
+            }
+            if policy.network == Network::Allow {
+                report.add(Severity::Info, &name, "closed mode explicitly allows unrestricted networking and native trust services; inherited network settings remain effective");
+            }
+        }
+        if profile.runtime.temporary_directory {
+            match fs::symlink_metadata(&paths.temporary) {
+                Ok(_) => {
+                    if let Err(error) = crate::launch::validate_temporary(&paths.temporary) {
+                        report.add(
+                            Severity::Error,
+                            &name,
+                            format!("runtime.temporary_directory: {error:#}"),
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => report.add(
+                    Severity::Error,
+                    &name,
+                    format!("runtime.temporary_directory: {error}"),
+                ),
+            }
+        }
+        if cfg!(target_os = "macos") {
+            match backend::current().and_then(|b| b.render(&policy)) {
+                Ok(_) => {}
+                Err(error) => report.add(
+                    Severity::Error,
+                    &name,
+                    format!("Seatbelt rendering: {error:#}"),
+                ),
+            }
+            if !Path::new("/usr/bin/sandbox-exec").is_file() {
+                report.add(
+                    Severity::Error,
+                    &name,
+                    "macOS launcher /usr/bin/sandbox-exec is missing",
+                );
+            }
+        }
+    }
+    if !cfg!(target_os = "macos") {
+        report.add(
+            Severity::Warning,
+            "platform",
+            "configuration analysis only: this OS has no execution backend",
+        );
+    }
+    Ok(report)
+}
+
+fn check_filesystem(
+    report: &mut Report,
+    name: &str,
+    profile: &config::Profile,
+    paths: &ContextPaths,
+    policy: &Policy,
+) {
+    for (field, grants) in [
+        ("filesystem.allow_read", &profile.filesystem.allow_read),
+        ("filesystem.allow_write", &profile.filesystem.allow_write),
+    ] {
+        for grant in grants {
+            let aliases = match resolve_path(grant, paths) {
+                Ok(aliases) => aliases,
+                Err(error) => {
+                    report.add(
+                        Severity::Error,
+                        name,
+                        format!("{field}: path changed during check: {error:#}"),
+                    );
+                    continue;
+                }
+            };
+            if let Some(deny) = policy
+                .deny
+                .iter()
+                .find(|deny| aliases.iter().any(|p| p.starts_with(deny)))
+            {
+                report.add(Severity::Warning, name, format!("{field} {grant:?} is blocked by deny {}; deny wins, remove the grant or revise its source restriction", deny.display()));
+            } else {
+                let count = policy
+                    .deny
+                    .iter()
+                    .filter(|deny| aliases.iter().any(|p| deny.starts_with(p)))
+                    .count();
+                if count > 0 {
+                    report.add(Severity::Info, name, format!("{field} {grant:?} has {count} denied path(s)/aliases below it; these exclusions and ancestor rename restrictions remain effective"));
+                }
+            }
+            if aliases
+                .iter()
+                .any(|p| p == Path::new("/") || p == Path::new("/System"))
+                && profile.mode == Mode::Closed
+            {
+                report.add(Severity::Warning, name, format!("{field} {grant:?} exposes broad filesystem trees, including the macOS data volume"));
+            }
+        }
+    }
+    for (label, path, required) in [
+        ("current directory", &paths.cwd, true),
+        (
+            "temporary directory",
+            &paths.temporary,
+            profile.runtime.temporary_directory,
+        ),
+    ] {
+        if required {
+            if let Ok(aliases) = crate::policy::path_aliases(path) {
+                if let Some(deny) = policy
+                    .deny
+                    .iter()
+                    .find(|d| aliases.iter().any(|p| p.starts_with(d)))
+                {
+                    report.add(
+                        Severity::Warning,
+                        name,
+                        format!(
+                            "{label} is blocked by deny {}; commands may fail",
+                            deny.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn patterns_overlap(a: &str, b: &str) -> bool {
+    let a = a.to_ascii_uppercase();
+    let b = b.to_ascii_uppercase();
+    environment::matches_pattern(a.trim_end_matches('*'), &b)
+        || environment::matches_pattern(b.trim_end_matches('*'), &a)
+}
+
+fn check_environment(report: &mut Report, name: &str, profile: &config::Profile) {
+    let settings = &profile.environment;
+    for error in environment::validation_errors(settings) {
+        report.add(Severity::Error, name, error);
+    }
+    for keep in &settings.keep {
+        for drop in &settings.drop {
+            if patterns_overlap(keep, drop) {
+                report.add(Severity::Warning, name, format!("environment.keep {keep:?} overlaps drop {drop:?}; drop wins for matching variables"));
+            }
+        }
+        if environment::INJECTION_PATTERNS
+            .iter()
+            .any(|pattern| patterns_overlap(keep, pattern))
+        {
+            report.add(
+                Severity::Warning,
+                name,
+                format!("environment.keep {keep:?} cannot restore runtime injection variables"),
+            );
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for (key, value) in &settings.set {
+        let upper = key.to_ascii_uppercase();
+        if !seen.insert(upper.clone()) {
+            report.add(Severity::Warning, name, format!("environment.set {key:?}: case variants are distinct assignments but keep/drop matching is case-insensitive"));
+        }
+        for drop in &settings.drop {
+            if environment::matches_pattern(&upper, &drop.to_ascii_uppercase()) {
+                report.add(
+                    Severity::Warning,
+                    name,
+                    format!("environment.set {key:?} is removed by drop {drop:?}"),
+                );
+            }
+        }
+        if matches!(
+            key.as_str(),
+            "HOME" | "PWD" | "LILBOX" | "TMPDIR" | "TMP" | "TEMP" | "OLDPWD"
+        ) {
+            report.add(
+                Severity::Warning,
+                name,
+                format!(
+                    "environment.set {key:?} is overwritten or removed by launch normalization"
+                ),
+            );
+        }
+        if key == "PATH"
+            && std::env::split_paths(value).any(|p| {
+                !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir)
+            })
+        {
+            report.add(
+                Severity::Warning,
+                name,
+                "environment.set PATH contains entries that launch normalization removes",
+            );
+        }
+    }
+    for drop in &settings.drop {
+        for key in ["HOME", "PWD", "PATH", "LILBOX", "TMPDIR", "TMP", "TEMP"] {
+            if environment::matches_pattern(key, &drop.to_ascii_uppercase())
+                && (profile.runtime.temporary_directory
+                    || !matches!(key, "TMPDIR" | "TMP" | "TEMP"))
+            {
+                report.add(
+                    Severity::Warning,
+                    name,
+                    format!(
+                        "environment.drop {drop:?} cannot remove mandatory launch variable {key}"
+                    ),
+                );
+            }
+        }
+    }
+}

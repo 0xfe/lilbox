@@ -20,12 +20,16 @@ is a historical implementation/verification record.
 ## Code map
 
 - `src/main.rs`: CLI, configuration lookup, launch orchestration.
-- `src/config.rs`: strict, versioned TOML schema and non-overwriting initialization.
+- `src/config.rs`: strict TOML schema, inheritance resolution, dependency protection,
+  and non-overwriting initialization.
+- `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
 - `src/environment.rs`: environment filtering/normalization and shell arguments.
 - `src/backend/`: backend interface, Seatbelt rendering, and basic runtime SBPL.
 - `src/launch.rs`: private scratch directory and hardened Unix process replacement.
 - `profiles/`: shipped TOML files embedded into the executable.
+- `examples/`: annotated standalone/inherited profiles; validate with
+  `just run --config-dir examples check --strict` when changing the gallery.
 - `tests/seatbelt.rs`: actual macOS enforcement tests; `tests/fixtures/trust_roots.c`
   checks native certificate discovery without network access or private keys.
 
@@ -45,6 +49,8 @@ just                          # list recipes
 just build                    # debug build, locked dependencies
 just run --help
 just run --print-policy
+just run check                # inspect every profile without launching
+just run -p default check --strict
 just fmt
 just install                  # writes ~/.local/bin/lilbox
 just install /custom/prefix    # writes PREFIX/bin/lilbox
@@ -87,7 +93,12 @@ contents change. Finish with `git diff --check` and review the diff.
 - Preserve explicit-deny precedence, canonical/lexical path protection, and
   protection against renaming ancestors of denied paths. Seatbelt operation
   specificity matters; a generic `file*` deny alone is insufficient.
-- Keep configuration paths protected, including individually symlinked profiles.
+- Keep configuration paths protected, including all inherited and individually
+  symlinked profiles. Preserve explicit child overrides, additive lists, deferred
+  schema defaults, and cycle/depth rejection.
+- Keep check and launch resolution/validation consistent. Check must remain
+  read-only, aggregate independent failures, and omit assignment values from
+  semantic diagnostics. Warnings describe precedence; they do not alter policy.
 - Preserve native TLS certificate discovery in online profiles. Blocking
   SecurityServer/securityd blocks public trust roots too. Never work around TLS
   failures by disabling certificate verification.
@@ -113,7 +124,7 @@ just release x86_64-apple-darwin       # matching Rust target must be installed
 
 `scripts/release.sh` supports Apple Silicon and Intel macOS, builds with locked
 dependencies, and writes versioned archives/checksums in `dist/`. Archives include
-the executable, README, license, changelog, profiles, and `docs/`. Verify the
+the executable, README, license, changelog, profiles, `examples/`, and `docs/`. Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
 Packaging is local: it does not sign, notarize, tag, or publish a release.
 `target/` and `dist/` are ignored build outputs.

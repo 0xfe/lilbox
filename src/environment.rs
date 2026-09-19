@@ -11,39 +11,42 @@ use std::{
 
 pub type ChildEnvironment = BTreeMap<OsString, OsString>;
 
-fn injection_variable(name: &str) -> bool {
-    name.starts_with("DYLD_")
-        || name.starts_with("LD_")
-        || name.starts_with("BASH_FUNC_")
-        || matches!(
-            name,
-            "ENV"
-                | "BASH_ENV"
-                | "ZDOTDIR"
-                | "SHELLOPTS"
-                | "BASHOPTS"
-                | "CDPATH"
-                | "GLOBIGNORE"
-                | "IFS"
-                | "NODE_OPTIONS"
-                | "NODE_PATH"
-                | "PYTHONPATH"
-                | "PYTHONHOME"
-                | "PYTHONSTARTUP"
-                | "RUBYOPT"
-                | "RUBYLIB"
-                | "PERL5OPT"
-                | "PERL5LIB"
-                | "JAVA_TOOL_OPTIONS"
-                | "JDK_JAVA_OPTIONS"
-                | "_JAVA_OPTIONS"
-                | "GIT_CONFIG_PARAMETERS"
-                | "GIT_CONFIG_COUNT"
-                | "GIT_ASKPASS"
-                | "SSH_ASKPASS"
-        )
-        || name.starts_with("GIT_CONFIG_KEY_")
-        || name.starts_with("GIT_CONFIG_VALUE_")
+pub(crate) const INJECTION_PATTERNS: &[&str] = &[
+    "DYLD_*",
+    "LD_*",
+    "BASH_FUNC_*",
+    "GIT_CONFIG_KEY_*",
+    "GIT_CONFIG_VALUE_*",
+    "ENV",
+    "BASH_ENV",
+    "ZDOTDIR",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "CDPATH",
+    "GLOBIGNORE",
+    "IFS",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONSTARTUP",
+    "RUBYOPT",
+    "RUBYLIB",
+    "PERL5OPT",
+    "PERL5LIB",
+    "JAVA_TOOL_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "_JAVA_OPTIONS",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+];
+
+pub(crate) fn injection_variable(name: &str) -> bool {
+    INJECTION_PATTERNS
+        .iter()
+        .any(|pattern| matches_pattern(name, pattern))
 }
 
 fn sensitive(name: &str) -> bool {
@@ -94,18 +97,45 @@ fn sensitive(name: &str) -> bool {
         )
 }
 
-fn matches_pattern(name: &str, pattern: &str) -> bool {
+pub(crate) fn matches_pattern(name: &str, pattern: &str) -> bool {
     pattern
         .strip_suffix('*')
         .map_or(name == pattern, |prefix| name.starts_with(prefix))
 }
 
-fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .enumerate()
             .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+}
+
+/// Shared by launching and static checking; never include assignment values.
+pub(crate) fn validation_errors(settings: &crate::config::Environment) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (field, patterns) in [("keep", &settings.keep), ("drop", &settings.drop)] {
+        for pattern in patterns {
+            if !valid_name(pattern.strip_suffix('*').unwrap_or(pattern)) {
+                errors.push(format!(
+                    "environment.{field}: invalid pattern {pattern:?}; use NAME or PREFIX*"
+                ));
+            }
+        }
+    }
+    for (name, value) in &settings.set {
+        if !valid_name(name) || value.contains('\0') {
+            errors.push(format!(
+                "environment.set {name:?}: invalid name or NUL in value"
+            ));
+        }
+        if injection_variable(&name.to_ascii_uppercase()) {
+            errors.push(format!(
+                "environment.set {name:?}: runtime injection variable cannot be set"
+            ));
+        }
+    }
+    errors
 }
 
 pub fn build(
@@ -114,19 +144,9 @@ pub fn build(
     source: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Result<ChildEnvironment> {
     let settings = &profile.environment;
-    for pattern in settings.keep.iter().chain(&settings.drop) {
-        let base = pattern.strip_suffix('*').unwrap_or(pattern);
-        if !valid_name(base) {
-            bail!("invalid environment pattern {pattern:?}; use NAME or PREFIX*");
-        }
-    }
-    for (name, value) in &settings.set {
-        if !valid_name(name) || value.contains('\0') {
-            bail!("invalid environment assignment for {name:?}");
-        }
-        if injection_variable(&name.to_ascii_uppercase()) {
-            bail!("runtime injection variable {name} cannot be set");
-        }
+    let errors = validation_errors(settings);
+    if !errors.is_empty() {
+        bail!("{}", errors.join("; "));
     }
     let inherits = settings.inherit.unwrap_or(profile.mode == Mode::Open);
     let mut result = BTreeMap::new();

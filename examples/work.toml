@@ -1,0 +1,16 @@
+# A permissive development profile with extra private paths and environment drops.
+# Parent: local default.toml when present, otherwise lilbox's embedded default.
+version = 1
+extends = "default"
+
+[filesystem]
+# Appended to inherited denies; ordinary files elsewhere remain writable.
+deny = ["~/Documents/Personal", "${CWD}/production.env"]
+
+[environment]
+drop = ["MY_COMPANY_*"]
+
+[environment.set]
+# Non-secret settings merge by exact variable name in child profiles.
+EDITOR = "vi"
+PAGER = "less"

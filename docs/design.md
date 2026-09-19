@@ -31,8 +31,9 @@ the working directory is a grant root, not a detected Git repository root.
 | Component | Responsibility |
 | --- | --- |
 | [src/main.rs](../src/main.rs) | Clap CLI, profile selection, launch context, command selection, error reporting. |
-| [src/config.rs](../src/config.rs) | Strict TOML schema, defaults, validation, loading, atomic initialization. |
+| [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking, atomic initialization. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
+| [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
 | [src/environment.rs](../src/environment.rs) | Child environment filtering, normalization, shell startup flags. |
 | [src/backend/mod.rs](../src/backend/mod.rs) | Backend interface and current-platform selection. |
 | [src/backend/seatbelt.rs](../src/backend/seatbelt.rs) | Seatbelt rendering and `sandbox-exec` command construction. |
@@ -69,10 +70,11 @@ flowchart TD
 2. `HOME` must be present and absolute. The configuration directory comes from
    `--config-dir`, otherwise nonempty absolute `XDG_CONFIG_HOME` plus `/lilbox`,
    otherwise `~/.config/lilbox`. Relative `--config-dir` paths use the launch CWD.
-3. `init` creates missing `default.toml` and `isolated.toml` and exits. It does not
-   require an OS sandbox backend.
+3. `init` creates missing `default.toml` and `isolated.toml` and exits. `check`
+   analyzes configurations and exits without executing a sandbox or creating
+   scratch storage. Neither command requires an OS execution backend.
 4. Normal launches load the selected profile, resolve paths, protect the config
-   directory and selected profile file, and build the child environment.
+   directory and every inherited profile file, and build the child environment.
 5. Backend selection currently succeeds only on macOS. `--print-policy` prints
    resolved native rules without launching a command or creating scratch storage.
    It cannot be combined with a command. It validates configuration/environment
@@ -94,7 +96,8 @@ explicit shell, for example `lilbox exec /bin/sh -c 'echo hello | cat'`.
 
 ## Configuration model
 
-Profile files are standalone, with no inheritance or merging between names.
+Profile files may declare `extends = "NAME"` to inherit one parent. Without this
+field they are standalone.
 The schema requires `version = 1`. Unknown fields in every configuration table,
 unknown enum values, and unsupported versions are errors. Profile names contain
 1–64 ASCII letters, digits, underscores, or hyphens; path traversal is rejected.
@@ -113,6 +116,71 @@ the new executable's policy renderer, environment filter, and shared deny list.
 `BTreeSet` deduplicates paths and gives deterministic ordering. The environment
 is constructed separately as a `BTreeMap<OsString, OsString>`.
 
+### Resolution and merge
+
+`config::load_resolved` returns a `LoadedProfile` containing the effective typed
+profile, the dependency names, and every source path in base-to-child order.
+Resolution validates each file with the strict Serde schema, then retains its
+TOML value without schema defaults for merging. This avoids mistaking an omitted child boolean
+for an explicit `false`, or injecting mode-dependent defaults before the final
+mode is known. `version = 1` is mandatory in each file.
+
+A depth-first resolver tracks active names and canonical file targets. Repeated
+names/targets are dependency cycles; error contexts show the chain. A 64-profile
+limit bounds recursion, including hard-link or otherwise unusual aliases. Invalid
+parent names cannot escape the configuration directory through path traversal.
+Symlinked files are intentionally supported. Only a genuinely absent `default`
+uses the embedded fallback, including when it is a parent.
+
+Merge tables recursively, append arrays with stable exact-value deduplication,
+and replace scalar values with explicit child values. Remove `extends` before
+merging. `environment.set` is a table, so individual exact-name child assignments
+replace the same parent keys. Empty arrays/tables do not remove inherited entries.
+Only then deserialize the merged value into `Profile` to apply schema defaults.
+Single inheritance avoids ambiguous precedence between unrelated parents.
+`config::parse` remains a standalone-document helper and rejects `extends` without
+a configuration directory.
+
+`LoadedProfile::policy` combines portable policy resolution with path protection
+for every contributing source file. Both launch and check use this method, so an
+inherited parent symlink cannot expose a writable policy file outside the config
+directory. Existing deny precedence and ancestor rename protection are unchanged.
+Environment validation is shared between `environment::build` and the checker.
+
+### Static configuration analysis
+
+`check::analyze` discovers local `*.toml` files in sorted order and always includes
+`default`, or accepts the explicit `-p` selection. Each selected profile is resolved
+independently; an invalid profile does not prevent checking the others. Invalid
+filenames, unreadable files, missing dependencies, schema errors, and cycles become
+errors. An unresolvable dependency prevents effective-policy checks for that chain.
+Within a resolved profile, all configured path entries and environment settings
+are validated independently to collect multiple errors. TOML schema errors include
+the source path and line. A directory-enumeration failure aborts discovery.
+
+The analyzer compares resolved path aliases with explicit/built-in/configuration
+denies. Grants fully shadowed by a deny produce warnings; broader grants with denied
+children produce informational exclusions, because those are common intentional
+policies. Environment pattern intersections are compared case-insensitively with
+the same exact/trailing-star semantics used at launch. It reports ineffective
+keeps, dropped assignments, reserved launch variables, suspicious closed-runtime
+combinations, broad root/system grants, inaccessible CWD/scratch, and unsafe existing
+scratch storage. Intentional child scalar and assignment overrides are not errors.
+
+The checker prints source chains and effective scalar settings, not assignment
+values in semantic diagnostics. It does not enumerate or print the parent process's
+environment. Terminal controls in report text are escaped. Colors require a terminal,
+no `NO_COLOR`, and a TERM other than `dumb`; glyphs and severity labels remain in
+redirected output. Errors return status 1, warnings return 0 unless `--strict` is
+used. CLI argument errors retain Clap's status 2.
+
+On macOS, check validates Seatbelt rendering and launcher presence. On other systems,
+portable configuration analysis works with an unsupported-execution warning.
+It never starts a process or modifies configuration/scratch storage. It cannot
+prove kernel enforcement, verify TLS connectivity or certificate contents, or
+statically determine all resources an arbitrary executable will need. Relative
+paths and aliases are evaluated from the current HOME/CWD, just as at launch.
+
 ## Filesystem resolution and precedence
 
 Paths support `~`, `${HOME}`, `${CWD}`, their slash-prefixed descendants, absolute
@@ -129,7 +197,8 @@ such as `/tmp` and `/private/tmp`, as well as existing user-created symlinks.
 
 The effective deny set includes the profile's `filesystem.deny`, the built-in
 credential list when enabled, the selected configuration directory, and the
-selected profile file's resolved target. Protecting an individually symlinked
+selected profile and every ancestor profile's resolved target. Protecting an
+individually symlinked
 profile prevents modifying its target outside the protected config directory.
 
 On macOS:
@@ -275,7 +344,7 @@ Do not interpret ordinary `cargo test` as proof of Seatbelt enforcement.
 [scripts/release.sh](../scripts/release.sh) to build a locked release for the native
 macOS target or an explicitly selected Apple Silicon/Intel target. It writes a
 versioned tarball and SHA-256 sidecar in `dist/`. Archives include the executable,
-README, license, changelog, profiles, and these docs. File order, ownership, modes,
+README, license, changelog, shipped profiles, the `examples/` gallery, and these docs. File order, ownership, modes,
 timestamps, and gzip headers are normalized; reproducibility assumes identical
 compiled input bytes. Packaging does not sign, notarize, tag, or publish releases.
 

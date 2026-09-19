@@ -39,6 +39,8 @@ lilbox init                   # creates examples; never overwrites existing file
 lilbox -p isolated exec /bin/sh -c 'echo hello; ls'
 lilbox -p isolated shell
 lilbox --print-policy         # inspect the exact native policy
+lilbox check                  # analyze all profiles and inheritance
+lilbox -p isolated check      # analyze one profile and its parents
 ```
 
 The `isolated` example starts closed, grants system tools and the current directory,
@@ -55,6 +57,7 @@ lilbox [OPTIONS] shell [SHELL_ARGS...]
 lilbox [OPTIONS] exec <PROGRAM> [ARGS...]
 lilbox [OPTIONS] <PROGRAM> [ARGS...]
 lilbox init
+lilbox [-p NAME] check [--strict]
 lilbox [-p NAME] --print-policy
 ```
 
@@ -82,8 +85,14 @@ Profiles live in `~/.config/lilbox/NAME.toml`, or
 `$XDG_CONFIG_HOME/lilbox/NAME.toml` when set. `--config-dir` overrides both.
 `default` has a built-in fallback; any other missing profile is an error.
 Malformed profiles, unknown fields, unsupported schema versions, and unsupported
-network modes fail before launching a command. Profiles are standalone and do not
-inherit from `default.toml`.
+network modes fail before launching a command. Profiles can inherit one parent with
+`extends = "NAME"`; without it, they are standalone.
+
+Browse the [example profiles](examples/README.md) for annotated configurations:
+[work](examples/work.toml) extends the default,
+[codex](examples/codex.toml) adds a second inheritance level, and
+[work-offline](examples/work-offline.toml) overrides network and environment settings.
+The gallery includes commands for trying profiles and copying their dependencies.
 
 Here is an open profile, for example `~/.config/lilbox/work.toml`:
 
@@ -122,6 +131,9 @@ spellings are protected; dangling symlinks and unresolvable paths are errors.
 ### Closed mode
 
 The complete starter profile is [profiles/isolated.toml](profiles/isolated.toml).
+For editable examples, see the standalone
+[workspace-offline](examples/workspace-offline.toml) and its inherited
+[workspace-online](examples/workspace-online.toml) variant.
 A minimal custom closed profile looks like this:
 
 ```toml
@@ -143,8 +155,8 @@ basic = true
 temporary_directory = true
 ```
 
-`mode = "closed"` alone grants no filesystem access, process execution, network, or
-runtime capabilities. The example explicitly grants:
+`mode = "closed"` in a standalone profile alone grants no filesystem access,
+process execution, network, or runtime capabilities. The example explicitly grants:
 
 - `allow_read`: reading and executable mapping under those paths.
 - `allow_write`: reading, executable mapping, and writing under those paths.
@@ -165,7 +177,7 @@ a system-only PATH unless you explicitly `keep = ["PATH"]` or set one. Merely
 adding a filesystem grant does not put an executable on PATH. A writable directory
 can contain executable code; these profiles do not distinguish source and binaries.
 
-Defaults for omitted fields:
+Defaults for fields omitted throughout the inheritance chain:
 
 | Setting | Open mode | Closed mode |
 | --- | --- | --- |
@@ -175,7 +187,7 @@ Defaults for omitted fields:
 | `runtime.basic` | `false` (already permitted by open mode) | `false` |
 | `runtime.temporary_directory` | `false` | `false` |
 
-The **shipped** profiles explicitly enable temporary storage. An omitted `mode`
+The **shipped** profiles explicitly enable temporary storage. A `mode` omitted throughout the inheritance chain
 means `"open"`. HOME, PWD, PATH, and `LILBOX=1` are always set as launch context;
 these variables grant no filesystem permissions. PATH drops relative/empty entries
 and the exact current directory. Without inherited PATH it defaults to
@@ -183,6 +195,71 @@ and the exact current directory. Without inherited PATH it defaults to
 is enabled. The scratch directory is `~/.cache/lilbox/tmp`, owned by the user with
 mode 0700. It persists across sessions and profiles; remove its contents when no
 sandbox is using it. Existing symlinks or insecure permissions on it are rejected.
+
+### Inherit and extend a profile
+
+See [work.toml](examples/work.toml) and [codex.toml](examples/codex.toml) for a
+complete `default → work → codex` chain, or
+[work-offline.toml](examples/work-offline.toml) for scalar and assignment overrides.
+
+Create `~/.config/lilbox/work.toml`:
+
+```toml
+version = 1
+extends = "default"
+
+[filesystem]
+deny = ["~/Documents/Personal"]
+
+[environment]
+keep = ["OPENAI_API_KEY"]
+```
+
+Then run `lilbox -p work check` and `lilbox -p work codex`. This retains the default
+network, certificate, credential, and temporary-directory behavior and adds the
+listed settings. `default` uses your local file when present, otherwise the built-in
+fallback. Other parents must exist in the same configuration directory.
+
+Parents can inherit too. Merge rules are deliberately simple:
+
+- Explicit child scalars override parent scalars, including `false`.
+- Lists append, with exact duplicates removed; `[]` does **not** clear a parent list.
+- `environment.set` merges by exact variable name; the child value wins.
+- Omitted settings inherit; schema defaults apply only after the entire merge.
+- Filesystem denies and environment drops still win over grants/keeps/assignments.
+
+Changing `mode` does not reset inherited settings: a child of `default` that sets
+`mode = "closed"` still inherits `network = "allow"` and
+`environment.inherit = true`. Override those explicitly or extend `isolated` for a
+closed baseline. To remove inherited list entries, edit the parent or use a
+standalone profile. Multiple parents are unsupported. Missing parents, malformed
+files, dependency loops (including symlink aliases), and chains longer than 64
+profiles are errors. Relative paths in every parent resolve against the launch
+CWD, not the parent's file location.
+
+### Check configuration
+
+```sh
+lilbox check                  # every local *.toml profile, plus default
+lilbox -p work check          # only work and its dependency chain
+lilbox -p work check --strict # warnings also cause a nonzero exit status
+```
+
+The report uses `✓ info`, `⚠ warning`, and `✗ error`, with colors on terminals
+unless `NO_COLOR` is set or `TERM=dumb`. It shows source files, inheritance chains,
+and effective settings. Independent errors are collected across profiles and
+path/environment fields. It identifies shadowed path grants (including symlink
+aliases and built-in restrictions), keep/drop conflicts, ignored environment
+settings, unsafe existing scratch storage, and closed-mode runtime pitfalls.
+Nested denies within broader grants are reported as intentional exclusions.
+Assignment values are omitted from semantic diagnostics.
+
+Errors return status 1; warnings alone return 0 unless `--strict` is used. Run the
+check from the intended working directory, because `${CWD}` and relative paths
+are contextual. It does not create files, run agents, or launch a sandbox.
+It validates policy rendering on macOS; other systems report that execution is
+unsupported. Static analysis cannot prove kernel enforcement, network/TLS
+connectivity, or that a particular agent has every resource it needs.
 
 ## Credential protection and authentication
 
@@ -193,7 +270,7 @@ Git credentials, Terraform credentials, password stores, macOS Keychains,
 and the launch directory's `.env` and `.env.local`. The exact list is in
 [src/policy.rs](src/policy.rs). These are fixed locations, not a recursive scan for
 every secret file. The selected lilbox configuration directory and the selected
-profile's symlink target are always denied.
+profile and all inherited profiles' symlink targets are always denied.
 
 The environment scrubber removes common API keys, token/secret/password/auth
 variables, cloud-provider credentials, SSH/GPG agent pointers, database URLs,
@@ -272,7 +349,7 @@ just release x86_64-apple-darwin
 
 Release packaging also needs Python 3. Install the matching Rust target before
 cross-compiling (`rustup target add x86_64-apple-darwin`). Archives contain the
-binary, README, license, changelog, example profiles, and `docs/`. Archive metadata is
+binary, README, license, changelog, shipped profiles, `examples/`, and `docs/`. Archive metadata is
 normalized so the same input bytes produce the same archive; compiler/SDK changes
 can still change the binary. Releases are unsigned and not notarized. Packaging
 does not publish, tag, or upload a release.

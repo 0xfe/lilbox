@@ -22,7 +22,8 @@ lilbox -p isolated --print-policy
 Resolution order is `--config-dir DIR`, then `$XDG_CONFIG_HOME/lilbox`, then
 `~/.config/lilbox`. A profile named `NAME` uses `NAME.toml`. Only a missing `default`
 has a built-in fallback; `isolated` requires its file, usually created by `init`.
-Profiles are standalone and never inherit from another profile.
+Profiles are standalone unless they declare `extends = "NAME"`. See the
+inheritance rules below; both shipped profiles remain standalone.
 
 `init` preserves existing files. Installing a new lilbox does not rewrite user
 TOML, but changes to shared policy code still affect existing profiles.
@@ -37,7 +38,7 @@ launches a process nor prints the child environment or asks macOS to enforce the
 | Ordinary filesystem access | Broad read/write/execute access outside shared denies. | Explicit system reads, CWD read/write, scratch access, and basic runtime devices only. |
 | Workspace | No workspace boundary. | The directory from which lilbox is launched, recursively, subject to denies. |
 | Credential/private paths | Shared deny list enabled. | Same deny list, even inside an otherwise granted subtree. |
-| lilbox configuration | Selected config directory and selected profile target denied. | Same. |
+| lilbox configuration | Config directory and all profile/dependency targets denied. | Same. |
 | Network | All network operations allowed. | Network operations denied, including TCP/UDP and Unix sockets. |
 | Native TLS trust services | Available; certificate verification stays enabled. | No online-trust service grants; credential service restrictions enabled. |
 | Environment | Inherit, then scrub sensitive/injection variables. | Inherit nothing except explicitly kept terminal/locale/timezone variables. |
@@ -191,8 +192,8 @@ files and arbitrary `production.env` files are not automatically added to the
 deny list. In open mode, copies of credentials outside these paths may remain
 readable. In closed mode, accessibility additionally depends on grants.
 
-The selected lilbox config directory and the selected profile file (including its
-canonical symlink target) are always denied, even with `protect_credentials = false`.
+The selected lilbox config directory and every file in the inheritance chain
+(including each canonical symlink target) are always denied, even with `protect_credentials = false`.
 Ancestors of denied paths cannot be unlinked/renamed by the sandboxed process.
 
 When credential protection is enabled **and** networking is denied, the renderer
@@ -284,12 +285,13 @@ accessible under the chosen profile.
 
 ## Custom profiles and omitted fields
 
-These schema defaults apply when a field is omitted, rather than copying values
-from either shipped TOML file:
+These schema defaults apply only when a field is omitted throughout the entire
+inheritance chain. A standalone profile does not copy either shipped TOML file:
 
 | Field | Default |
 | --- | --- |
-| `version` | Required; only `1` is supported. |
+| `version` | Required in every file; only `1` is supported. |
+| `extends` | No parent. Optional single profile name. |
 | `mode` | `"open"`. |
 | `network` | `"allow"` in open mode, `"deny"` in closed mode. |
 | `filesystem.protect_credentials` | `true`. |
@@ -298,8 +300,8 @@ from either shipped TOML file:
 | `environment.keep`, `drop`, `set` | Empty lists/map. |
 | `runtime.basic`, `temporary_directory` | Both `false`. |
 
-Thus `version = 1` plus `mode = "closed"` alone grants no execution, filesystem,
-network, or basic-runtime capabilities. It cannot start an ordinary shell.
+Thus a standalone `version = 1` plus `mode = "closed"` alone grants no execution,
+filesystem, network, or basic-runtime capabilities. It cannot start an ordinary shell.
 
 Path entries support `~`, `${HOME}`, `${CWD}`, absolute paths, and CWD-relative
 paths. There are no globs, general variable expansion, or `..` components. Grant
@@ -310,3 +312,89 @@ Adding an allow entry never cancels an explicit deny. To intentionally replace t
 built-in deny list, disable `protect_credentials` and supply your own restrictions.
 Review the resulting native policy from the intended working directory and use
 the real macOS enforcement tests for changes to these semantics.
+
+## Inherited profiles
+
+For example, a custom `work.toml` can extend the permissive default:
+
+```toml
+version = 1
+extends = "default"
+
+[filesystem]
+deny = ["~/Documents/Personal"]
+
+[environment]
+keep = ["OPENAI_API_KEY"]
+```
+
+Its filesystem, certificate services, network, environment filtering, and scratch
+rules are the effective `default` rules plus the extra path deny and authentication
+opt-in. It can still read/write ordinary files outside the workspace. Parent names
+resolve in the selected config directory; only `default` has an embedded fallback.
+`isolated` must first be installed with `lilbox init` or provided locally.
+
+| Setting type | Inheritance behavior |
+| --- | --- |
+| `version` | Required and validated separately in every file. |
+| `extends` | One parent name; recursive inheritance supported, maximum 64 files. |
+| `mode`, `network`, environment inheritance, protection/runtime booleans | Explicit child value overrides; omission preserves parent value. |
+| Filesystem read/write/deny lists and environment keep/drop lists | Append parent then child; deduplicate exact strings. Empty child lists preserve the parent. |
+| `environment.set` | Merge by case-sensitive variable name; child overrides the same key. |
+| Unspecified fields | Apply schema defaults after merging all ancestors. |
+
+Inheritance is configuration reuse, not an immutable security boundary. A child can
+explicitly change `protect_credentials`, mode, network, or environment inheritance.
+Inherited explicit deny/drop list entries remain in force; new grants/keeps cannot
+cancel them. Disable `protect_credentials` to remove the built-in credential list,
+but this does not remove inherited explicit denies. There is no list subtraction
+or multiple-parent ordering. Use a standalone profile or change the parent when
+inherited list entries must be removed.
+
+For a child of `default`, `mode = "closed"` alone retains the parent's explicit
+network allow, environment inheritance, and temporary storage. Start from
+`isolated` or explicitly override those settings for an offline baseline. Defaults
+that were never explicitly set are determined by the final mode.
+
+All relative paths and `${CWD}` entries, including those from ancestors, resolve
+against the launch CWD. The entire config directory and all contributing profile
+files (lexical and canonical paths) are denied regardless of credential protection.
+This includes parents symlinked into a separate dotfiles checkout. Ancestor rename
+protection applies to these targets too. Resolution remains a launch-time snapshot.
+
+Invalid names, missing parents, invalid TOML/types/versions, cycles by name or
+canonical file target, and excessive depth prevent launching. `lilbox check`
+inspects every local TOML file plus default; `lilbox -p work check` checks only the
+selected chain. Missing `isolated` is not an error unless selected or inherited.
+A malformed dependency stops analysis of that effective profile, but other profiles
+are still checked. Scalar/key overrides are intentional, not conflicts.
+
+The check report includes shadowed grants, effective denies and subdirectory
+exclusions, overlapping keep/drop patterns, dropped assignments, runtime-injection
+keeps, normalization of reserved variables, broad closed-mode grants, inaccessible
+CWD/scratch paths, unsafe existing scratch permissions, and closed-mode runtime
+settings. Warnings describe deterministic precedence, and do not change permissions
+or block launching. `check --strict` makes warnings fail the check. Static checks
+use current path aliases and do not probe actual network connections, certificate
+contents, kernel policy compilation, or executable dependencies.
+
+## Example profile gallery
+
+The [examples guide](../examples/README.md) describes five editable profiles and
+how to try or install them with their dependencies:
+
+- [work](../examples/work.toml) extends default with private-path denies and
+  environment drops; [codex](../examples/codex.toml) extends work with an API-key
+  opt-in and another deny.
+- [work-offline](../examples/work-offline.toml) retains work's open filesystem,
+  overrides networking to deny, adds proxy drops, and overrides one environment
+  assignment while preserving the others.
+- [workspace-offline](../examples/workspace-offline.toml) is a standalone closed
+  profile with system reads, CWD writes, explicit secret-file denies, basic runtime,
+  scratch storage, and a small environment keep list.
+- [workspace-online](../examples/workspace-online.toml) inherits that closed
+  filesystem and runtime, permits network/native trust services, and adds explicit
+  proxy/CA-variable keeps. Custom CA files may require additional read grants.
+
+These examples are included in release archives but are not installed by `init`.
+All retain credential protection; see the gallery for their effective boundaries.

@@ -1,0 +1,13 @@
+# Multi-level inheritance with scalar and map-key overrides.
+# Copy work.toml alongside this file. Filesystem access remains broadly open.
+version = 1
+extends = "work"
+network = "deny"
+
+[environment]
+# Extends work's drops. Proxy settings cannot enable network access in this mode.
+drop = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY"]
+
+[environment.set]
+# Replaces work's PAGER while retaining its EDITOR setting.
+PAGER = "cat"

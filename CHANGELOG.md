@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add annotated example profiles for standalone, inherited, offline, and online
+  configurations, with usage instructions and inclusion in release archives.
+
+- Add recursive single-parent profile inheritance with explicit scalar overrides,
+  additive lists, assignment merging, cycle/depth validation, and protection for
+  every inherited configuration file.
+- Add `lilbox check` and `lilbox -p NAME check`, with aggregated errors, conflict
+  warnings, terminal-aware reporting, and `--strict` for warning-free checks.
+
 - Fix native macOS root certificate discovery in online profiles, which could
   cause Codex HTTPS/WebSocket connections to fail with `UnknownIssuer`.
 - Preserve inherited proxy and CA-bundle settings for permissive networking.

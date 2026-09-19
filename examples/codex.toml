@@ -1,0 +1,13 @@
+# Multi-level inheritance: default -> work -> codex.
+# Copy work.toml alongside this file when installing it in your config directory.
+version = 1
+extends = "work"
+
+[filesystem]
+# Extends work's deny list; does not replace it.
+deny = ["${CWD}/customer-data"]
+
+[environment]
+# Explicit opt-in: passes this API key only if it exists in the parent environment.
+# Remove this entry if you prefer agent-managed login state.
+keep = ["OPENAI_API_KEY"]

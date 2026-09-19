@@ -25,6 +25,7 @@ install -m 755 "target/$target/release/lilbox" "$stage/$name/lilbox"
 cp README.md LICENSE CHANGELOG.md "$stage/$name/"
 cp -R profiles "$stage/$name/profiles"
 cp -R docs "$stage/$name/docs"
+cp -R examples "$stage/$name/examples"
 # Stable tar metadata and gzip headers, given identical compiled input bytes.
 # Python 3 is available with the macOS developer tools needed to build Rust.
 python3 - "$stage" "$name" "dist/$name.tar.gz" <<'PY'

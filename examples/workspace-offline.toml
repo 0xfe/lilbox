@@ -1,0 +1,22 @@
+# A standalone closed profile; no parent file is needed.
+# Suitable for basic system commands. Add your toolchain and caches as needed.
+version = 1
+mode = "closed"
+network = "deny"
+
+[filesystem]
+protect_credentials = true
+# Narrow system reads; granting all /System would expose /System/Volumes/Data.
+allow_read = ["/System/Library", "/System/Cryptexes", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc"]
+# Write grants include reading/execution. CWD is where lilbox is invoked.
+allow_write = ["${CWD}"]
+# These remain blocked even though their parent directory is writable.
+deny = ["${CWD}/secrets", "${CWD}/production.env"]
+
+[environment]
+inherit = false
+keep = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+
+[runtime]
+basic = true
+temporary_directory = true

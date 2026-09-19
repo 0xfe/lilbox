@@ -1,9 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use lilbox::{
-    backend, config, environment, launch,
-    policy::{ContextPaths, Policy},
-};
+use lilbox::{backend, check, config, environment, launch, policy::ContextPaths};
 use std::{ffi::OsString, path::PathBuf};
 
 #[derive(Parser, Debug)]
@@ -13,9 +10,9 @@ use std::{ffi::OsString, path::PathBuf};
     after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox --print-policy\n\nRun `lilbox init` to create example profiles."
 )]
 struct Cli {
-    /// Profile name in the lilbox configuration directory
-    #[arg(short, long, default_value = "default")]
-    profile: String,
+    /// Profile name (launch default: default; check default: all profiles)
+    #[arg(short, long)]
+    profile: Option<String>,
     /// Override ~/.config/lilbox (or $XDG_CONFIG_HOME/lilbox)
     #[arg(long, value_name = "DIR")]
     config_dir: Option<PathBuf>,
@@ -30,6 +27,12 @@ struct Cli {
 enum Action {
     /// Create default.toml and isolated.toml; preserve existing files
     Init,
+    /// Analyze all profiles (or -p NAME) without launching a sandbox
+    Check {
+        /// Treat warnings as failures too
+        #[arg(long)]
+        strict: bool,
+    },
     /// Start an interactive $SHELL with user startup files disabled
     Shell {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -85,19 +88,23 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let profile = config::load(&config_directory, &cli.profile)?;
     let paths = ContextPaths {
         temporary: home.join(".cache/lilbox/tmp"),
         home,
         cwd: std::env::current_dir()?,
         config: config_directory,
     };
-    let mut policy = Policy::resolve(&profile, &paths)?;
-    // Dotfile managers commonly symlink individual profiles outside the config
-    // directory. Protect the selected file's target as well as its directory.
-    policy.deny.extend(lilbox::policy::path_aliases(
-        &paths.config.join(format!("{}.toml", cli.profile)),
-    )?);
+    if let Some(Action::Check { strict }) = cli.command {
+        let report = check::analyze(&paths, cli.profile.as_deref())?;
+        report.print();
+        if report.failed(strict) {
+            bail!("configuration check failed");
+        }
+        return Ok(());
+    }
+    let loaded = config::load_resolved(&paths.config, cli.profile.as_deref().unwrap_or("default"))?;
+    let policy = loaded.policy(&paths)?;
+    let profile = loaded.profile;
     let child_environment = environment::build(&profile, &paths, std::env::vars_os())?;
     let backend = backend::current()?;
     if cli.print_policy {
@@ -115,7 +122,7 @@ fn run() -> Result<()> {
             command.extend(args);
             command
         }
-        Action::Init => unreachable!(),
+        Action::Init | Action::Check { .. } => unreachable!(),
     };
     if profile.runtime.temporary_directory {
         launch::prepare_temporary(&paths.temporary)?;
@@ -146,7 +153,7 @@ mod tests {
             "two words",
         ])
         .unwrap();
-        assert_eq!(cli.profile, "isolated");
+        assert_eq!(cli.profile.as_deref(), Some("isolated"));
         let Some(Action::Agent(argv)) = cli.command else {
             panic!()
         };

@@ -403,3 +403,32 @@ fn default_profile_preserves_native_tls_trust_roots() {
         ],
     ));
 }
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn inherited_profiles_enforce_merged_permissions_and_protect_all_sources() {
+    let f = Fixture::new();
+    let base = f.home.join("external-base.toml");
+    fs::write(&base, "version=1\nextends='isolated'\n[filesystem]\ndeny=['${CWD}/parent-secret']\n[environment]\ndrop=['MY_SECRET']\nset={PARENT_FLAG='present'}").unwrap();
+    symlink(&base, f.config.join("base.toml")).unwrap();
+    f.profile("child", "version=1\nextends='base'\n[filesystem]\nallow_read=['~/outside']\nallow_write=['${CWD}/parent-secret']\ndeny=['${CWD}/child-secret']\n[environment]\nkeep=['MY_SECRET']\nset={CHILD_FLAG='present',MY_SECRET='still-dropped'}");
+    fs::write(f.work.join("parent-secret"), "private").unwrap();
+    fs::write(f.work.join("child-secret"), "private").unwrap();
+    succeeds(&f.run("child", &["/bin/sh", "-c", "test \"$PARENT_FLAG\" = present && test \"$CHILD_FLAG\" = present && test -z \"${MY_SECRET+x}\" && cat allowed && cat \"$HOME/outside\" && echo ok > created"]));
+    denied(&f.run("child", &["/bin/cat", "parent-secret"]));
+    denied(&f.run("child", &["/bin/cat", "child-secret"]));
+    denied(&f.run("child", &["/bin/sh", "-c", "echo bad > parent-secret"]));
+    denied(&f.run("child", &["/bin/sh", "-c", "cat \"$HOME/.ssh/key\""]));
+    // Open the baseline too: source protection must not rely on a closed default.
+    f.profile("open-child", "version=1\nextends='base'\nmode='open'\nnetwork='allow'\n[filesystem]\nprotect_credentials=false");
+    denied(&f.run("open-child", &["/bin/cat", base.to_str().unwrap()]));
+    denied(&f.run(
+        "open-child",
+        &["/bin/sh", "-c", "echo bad > \"$HOME/external-base.toml\""],
+    ));
+    assert!(
+        fs::read_to_string(base)
+            .unwrap()
+            .contains("extends='isolated'")
+    );
+}
