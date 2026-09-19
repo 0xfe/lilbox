@@ -1,0 +1,17 @@
+; Explicit `runtime.basic` capability bundle. Filesystem/toolchain grants live
+; in the profile. Keep service lookup narrow; never grant all Mach services.
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+; The system runtime opens the filesystem root during process initialization.
+(allow file-read* (literal "/"))
+(allow file-read-metadata (literal "/dev"))
+(allow file-read* (literal "/dev/random") (literal "/dev/urandom"))
+(allow file-read* file-write-data (literal "/dev/null") (literal "/dev/zero"))
+(allow file-read* file-write-data (subpath "/dev/fd"))
+(allow file-read* file-write* file-ioctl (literal "/dev/tty"))
+(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+(allow file-read* file-write* file-ioctl (regex #"^/dev/ttys[0-9]+$"))
+(allow pseudo-tty)

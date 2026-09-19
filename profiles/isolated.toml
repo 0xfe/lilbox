@@ -1,0 +1,22 @@
+# Closed by default. Every grant below is intentional.
+version = 1
+mode = "closed"
+network = "deny"
+
+[filesystem]
+protect_credentials = true
+# System tools/libraries. Add your toolchain or agent installation as needed.
+allow_read = ["/System/Library", "/System/Cryptexes", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc"]
+# Write grants also allow reading. CWD is the directory where lilbox is invoked.
+allow_write = ["${CWD}"]
+deny = []
+
+[environment]
+inherit = false
+keep = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+
+[runtime]
+# Processes, same-sandbox signals, sysctl reads, standard devices and terminal I/O.
+basic = true
+# Grants a private per-user scratch directory and sets TMPDIR/TMP/TEMP.
+temporary_directory = true

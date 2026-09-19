@@ -1,0 +1,357 @@
+//! Run explicitly with `just test-sandbox` on an unsandboxed macOS host.
+//! Do not silently skip enforcement failures when this suite is requested.
+#![cfg(target_os = "macos")]
+
+use std::{
+    fs,
+    net::TcpListener,
+    os::unix::{fs::symlink, process::CommandExt},
+    path::PathBuf,
+    process::{Command, Output},
+};
+
+struct Fixture {
+    _root: tempfile::TempDir,
+    home: PathBuf,
+    work: PathBuf,
+    config: PathBuf,
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(root.path()).unwrap();
+        let home = base.join("home");
+        let work = base.join("work");
+        let config = home.join(".config/lilbox");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir(&work).unwrap();
+        fs::create_dir(home.join(".ssh")).unwrap();
+        fs::write(home.join(".ssh/key"), "fake credential").unwrap();
+        fs::write(home.join("outside"), "outside").unwrap();
+        fs::write(work.join("allowed"), "allowed").unwrap();
+        fs::write(
+            config.join("isolated.toml"),
+            lilbox::config::ISOLATED_PROFILE,
+        )
+        .unwrap();
+        Self {
+            _root: root,
+            home,
+            work,
+            config,
+        }
+    }
+    fn command(&self, profile: &str) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_lilbox"));
+        c.env_clear()
+            .env("HOME", &self.home)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("SHELL", "/bin/zsh")
+            .current_dir(&self.work)
+            .arg("--config-dir")
+            .arg(&self.config)
+            .args(["-p", profile]);
+        c
+    }
+    fn run(&self, profile: &str, args: &[&str]) -> Output {
+        self.command(profile)
+            .arg("exec")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+    fn profile(&self, name: &str, text: &str) {
+        fs::write(self.config.join(format!("{name}.toml")), text).unwrap();
+    }
+}
+fn succeeds(output: &Output) {
+    assert!(
+        output.status.success(),
+        "status {:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+fn denied(output: &Output) {
+    assert!(
+        !output.status.success(),
+        "unexpected success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Operation not permitted") || stderr.contains("Permission denied"),
+        "not an enforcement failure: {stderr}"
+    );
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn open_mode_denies_credentials_in_children_and_through_aliases() {
+    let f = Fixture::new();
+    succeeds(&f.run("default", &["/bin/cat", "allowed"]));
+    denied(&f.run("default", &["/bin/sh", "-c", "cat \"$HOME/.ssh/key\""]));
+    denied(&f.run(
+        "default",
+        &["/bin/sh", "-c", "echo bad > \"$HOME/.ssh/new\""],
+    ));
+    symlink(f.home.join(".ssh"), f.work.join("alias")).unwrap();
+    denied(&f.run("default", &["/bin/cat", "alias/key"]));
+    denied(&f.run(
+        "default",
+        &["/bin/sh", "-c", "mv \"$HOME/.ssh\" \"$HOME/moved\""],
+    ));
+    denied(&f.run(
+        "default",
+        &["/bin/sh", "-c", "mv \"$HOME\" \"${HOME}-moved\""],
+    ));
+    denied(&f.run(
+        "default",
+        &[
+            "/bin/sh",
+            "-c",
+            "cat \"$HOME/.config/lilbox/isolated.toml\"",
+        ],
+    ));
+    succeeds(&f.run("default", &["/bin/sh", "-c", "echo ok > created"]));
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn configured_symlinks_future_paths_and_deny_precedence() {
+    let f = Fixture::new();
+    fs::write(f.home.join("external.toml"), "version=1").unwrap();
+    symlink(f.home.join("external.toml"), f.config.join("linked.toml")).unwrap();
+    succeeds(&f.run("linked", &["/bin/cat", "allowed"]));
+    denied(&f.run(
+        "linked",
+        &["/bin/sh", "-c", "echo bad > \"$HOME/external.toml\""],
+    ));
+    fs::create_dir(f.home.join("real")).unwrap();
+    symlink(f.home.join("real"), f.home.join("linked")).unwrap();
+    f.profile(
+        "custom",
+        "version=1\n[filesystem]\nallow_write=['${HOME}']\ndeny=['~/linked/future', '${CWD}/a\"b']",
+    );
+    fs::write(f.work.join("a\"b"), "blocked").unwrap();
+    denied(&f.run("custom", &["/bin/cat", "a\"b"]));
+    denied(&f.run("custom", &["/bin/sh", "-c", "mkdir \"$HOME/real/future\""]));
+    denied(&f.run("custom", &["/bin/sh", "-c", "cat \"$HOME/.ssh/key\""]));
+    // .config itself must not be movable to bypass the descendant restriction.
+    denied(&f.run(
+        "custom",
+        &[
+            "/bin/sh",
+            "-c",
+            "mv \"$HOME/.config\" \"$HOME/config-moved\"",
+        ],
+    ));
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn closed_mode_grants_only_configured_paths_and_runtime() {
+    let f = Fixture::new();
+    succeeds(&f.run("isolated", &["/bin/cat", "allowed"]));
+    succeeds(&f.run(
+        "isolated",
+        &[
+            "/bin/sh",
+            "-c",
+            "echo ok > created; echo tmp > \"$TMPDIR/test\"; cat created",
+        ],
+    ));
+    denied(&f.run("isolated", &["/bin/sh", "-c", "cat \"$HOME/outside\""]));
+    denied(&f.run("isolated", &["/bin/sh", "-c", "echo bad > \"$HOME/new\""]));
+    denied(&f.run("isolated", &["/bin/sh", "-c", "cat \"$HOME/.ssh/key\""]));
+    fs::write(f.work.join(".env"), "fake secret").unwrap();
+    denied(&f.run("isolated", &["/bin/cat", ".env"]));
+    denied(&f.run("isolated", &["/bin/sh", "-c", "echo bad > .env"]));
+    fs::create_dir(f.work.join("blocked")).unwrap();
+    fs::write(f.work.join("blocked/key"), "secret").unwrap();
+    f.profile(
+        "nested",
+        &lilbox::config::ISOLATED_PROFILE.replace("deny = []", "deny = ['${CWD}/blocked']"),
+    );
+    denied(&f.run("nested", &["/bin/cat", "blocked/key"]));
+    denied(&f.run("nested", &["/bin/sh", "-c", "echo bad > blocked/new"]));
+    f.profile(
+        "metadata",
+        &lilbox::config::ISOLATED_PROFILE
+            .replace("deny = []", "deny = ['${CWD}/blocked']")
+            .replace("\"/usr\"", "\"/usr\", \"${CWD}/blocked/key\""),
+    );
+    denied(&f.run("metadata", &["/usr/bin/stat", "blocked"]));
+    let data_alias = format!("/System/Volumes/Data{}/outside", f.home.display());
+    if std::path::Path::new(&data_alias).exists() {
+        denied(&f.run("isolated", &["/bin/cat", &data_alias]));
+    }
+    f.profile("empty", "version=1\nmode='closed'");
+    assert!(!f.run("empty", &["/usr/bin/true"]).status.success());
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn network_allow_and_deny_are_enforced_in_both_modes() {
+    let f = Fixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    for (name, mode, network, allow) in [
+        ("open_yes", "open", "allow", true),
+        ("open_no", "open", "deny", false),
+        ("closed_yes", "closed", "allow", true),
+        ("closed_no", "closed", "deny", false),
+    ] {
+        let profile = lilbox::config::ISOLATED_PROFILE
+            .replace("mode = \"closed\"", &format!("mode = \"{mode}\""))
+            .replace("network = \"deny\"", &format!("network = \"{network}\""));
+        f.profile(name, &profile);
+        let output = f.run(name, &["/usr/bin/nc", "-z", "-G", "1", "127.0.0.1", &port]);
+        if allow {
+            succeeds(&output);
+        } else {
+            assert!(!output.status.success(), "{name} allowed network");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn unix_socket_connections_are_blocked_by_network_deny() {
+    use std::os::unix::net::UnixListener;
+    let f = Fixture::new();
+    let socket = f.work.join("s");
+    let _listener = UnixListener::bind(&socket).unwrap();
+    f.profile("offline", "version=1\nnetwork='deny'");
+    let args = [
+        "/usr/bin/nc",
+        "-v",
+        "-U",
+        "-w",
+        "1",
+        socket.to_str().unwrap(),
+    ];
+    succeeds(&f.run("default", &args));
+    assert!(!f.run("offline", &args).status.success());
+    assert!(!f.run("isolated", &args).status.success());
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn named_agents_keep_their_arguments_and_non_utf8_arguments_survive() {
+    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+    let f = Fixture::new();
+    let bin = f.home.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let agent = bin.join("codex");
+    fs::write(&agent, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = f
+        .command("default")
+        .env("PATH", &bin)
+        .args(["codex", "--help", "-p", "agent-profile", "two words"])
+        .output()
+        .unwrap();
+    succeeds(&output);
+    assert_eq!(output.stdout, b"--help\n-p\nagent-profile\ntwo words\n");
+    let output = f
+        .command("default")
+        .args(["exec", "/usr/bin/printf", "%s"])
+        .arg(std::ffi::OsString::from_vec(vec![b'a', 0xff, b'b']))
+        .output()
+        .unwrap();
+    succeeds(&output);
+    assert_eq!(output.stdout, vec![b'a', 0xff, b'b']);
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn environment_arguments_exit_status_shell_startup_and_umask() {
+    let f = Fixture::new();
+    let output = f.command("default").env("OPENAI_API_KEY", "fake-secret").env("SSH_AUTH_SOCK", "/fake/agent.sock").args(["exec", "/bin/sh", "-c", "test -z \"${OPENAI_API_KEY+x}\" && test -z \"${SSH_AUTH_SOCK+x}\" && test \"$(umask)\" = 0077"]).output().unwrap();
+    succeeds(&output);
+    let output = f.run(
+        "default",
+        &["/usr/bin/printf", "%s", "a; echo unsafe $(id) two words"],
+    );
+    succeeds(&output);
+    assert_eq!(output.stdout, b"a; echo unsafe $(id) two words");
+    assert_eq!(
+        f.run("default", &["/bin/sh", "-c", "exit 42"])
+            .status
+            .code(),
+        Some(42)
+    );
+    fs::write(f.home.join(".zshrc"), "print LEAKED_RC").unwrap();
+    let output = f
+        .command("default")
+        .args(["shell", "-c", "print SAFE"])
+        .output()
+        .unwrap();
+    succeeds(&output);
+    assert_eq!(output.stdout, b"SAFE\n");
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn inherited_descriptors_are_closed_and_signal_status_is_preserved() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fixture::new();
+    let secret = fs::File::open(f.home.join(".ssh/key")).unwrap();
+    let fd = secret.as_raw_fd();
+    let mut c = f.command("default");
+    c.args(["exec", "/bin/sh", "-c", "cat <&99"]);
+    unsafe {
+        c.pre_exec(move || {
+            if libc::dup2(fd, 99) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = c.output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Bad file descriptor"));
+    let output = f.run("default", &["/bin/sh", "-c", "kill -TERM $$"]);
+    assert_eq!(output.status.signal(), Some(libc::SIGTERM));
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn interactive_shell_retains_a_terminal_in_both_modes() {
+    let f = Fixture::new();
+    for profile in ["default", "isolated"] {
+        let output = Command::new("/usr/bin/script")
+            .env_clear()
+            .env("HOME", &f.home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("SHELL", "/bin/zsh")
+            .env("TERM", "xterm")
+            .current_dir(&f.work)
+            .args([
+                "-q",
+                "/dev/null",
+                env!("CARGO_BIN_EXE_lilbox"),
+                "--config-dir",
+            ])
+            .arg(&f.config)
+            .args([
+                "-p",
+                profile,
+                "shell",
+                "-c",
+                "test -t 0 && test -t 1 && print TTY_OK",
+            ])
+            .output()
+            .unwrap();
+        succeeds(&output);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("TTY_OK"),
+            "{profile}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}

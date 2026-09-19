@@ -1,0 +1,25 @@
+# Rust build artifacts and packaged releases.
+/target/
+/dist/
+
+# Keep Cargo.lock tracked: lilbox is an application.
+
+# Rustfmt backups and profiling output.
+**/*.rs.bk
+*.profraw
+*.profdata
+
+# Local environment files; retain shareable examples.
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# macOS metadata.
+.DS_Store
+._*
+
+# Editor swap and backup files.
+*.swp
+*.swo
+*~

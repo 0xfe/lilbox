@@ -1,0 +1,34 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-14, macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+      - name: Real Seatbelt enforcement
+        if: runner.os == 'macOS'
+        run: cargo test --locked --test seatbelt -- --ignored --test-threads=1
+      - name: Package macOS release
+        if: runner.os == 'macOS'
+        run: bash scripts/release.sh
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: lilbox-${{ matrix.os }}
+          path: dist/*
