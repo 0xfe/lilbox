@@ -26,7 +26,9 @@ never silently run an unsandboxed command.
 - **Open mode:** allow by default, with a built-in deny list for common credential
   stores, private directories, shell history, and lilbox's own configuration.
   Scrub credential variables, agent sockets, and runtime injection variables.
-  Block common credential-service IPC. Keep network available by default.
+  Keep native certificate/trust services and proxy settings available for online
+  profiles; block common credential-service IPC in offline profiles. Keep network
+  available by default.
 - **Closed mode:** deny by default, with filesystem grants and runtime
   capabilities explicitly selected in configuration. Environment inheritance and
   network access default off. The shipped `isolated` example explicitly enables a
@@ -121,3 +123,25 @@ will be recorded below as implementation proceeds.
   Release executable help and version smoke checks pass.
 - `just release` rebuilt the Apple Silicon archive; SHA-256 verification passes.
   No source or dependency changes were necessary for compatibility.
+
+## Default-network TLS correction — 2026-09-19
+
+- Reproduced native root-certificate loading failure under the original default
+  profile: `SecTrustSettingsCopyCertificates` failed for the system trust domain
+  with OSStatus -25263. The same probe succeeds outside the sandbox.
+- Root cause: denying SecurityServer/securityd Mach lookups also denies public
+  certificate discovery used by rustls-native-certs. Online profiles now preserve
+  those services; private-keychain file denies remain in place. Network-deny
+  profiles keep the existing service restrictions.
+- Inherited proxy settings and public CA-bundle paths now survive sanitization;
+  explicit environment drops and closed-mode environment defaults still apply.
+  Certificate verification is not weakened or disabled.
+- `just verify` passes: formatting, Clippy, 13 portable tests, and ten host
+  enforcement tests. The native-certificate regression test requires the default
+  sandbox to expose the same public trust settings as the host and still reject
+  direct reads of a fake private-keychain file.
+- Rebuilt and installed the fix to `~/.local/bin/lilbox`. An unauthenticated HTTPS
+  request through the installed executable and existing default profile completed
+  TLS verification (api.openai.com returned HTTP 421, an application-layer reply).
+  A second verified HTTPS request to www.apple.com returned HTTP 200.
+  Authenticated Codex conversations were not initiated as part of verification.

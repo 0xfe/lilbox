@@ -4,6 +4,10 @@ A small Rust wrapper for running coding agents and commands inside an OS sandbox
 Version **0.1.0** supports **macOS** through Seatbelt (`sandbox-exec`). Linux and
 Windows execution deliberately fail until a backend is implemented.
 
+See [the design](docs/design.md) for implementation details and
+[the profile reference](docs/profiles.md) for exact permissions and environment
+rules. Contributor instructions are in [AGENTS.md](AGENTS.md).
+
 ## Quickstart
 
 You need Rust/Cargo (1.85+), [Just](https://github.com/casey/just), and macOS with
@@ -192,25 +196,44 @@ every secret file. The selected lilbox configuration directory and the selected
 profile's symlink target are always denied.
 
 The environment scrubber removes common API keys, token/secret/password/auth
-variables, cloud-provider settings, SSH/GPG agent pointers, database URLs, proxy
-settings, and loader/interpreter injection hooks. New or unusually named secrets
+variables, cloud-provider credentials, SSH/GPG agent pointers, database URLs,
+and loader/interpreter injection hooks. Proxy and CA-bundle settings are inherited
+when environment inheritance is enabled. New or unusually named secrets
 can require your own `drop` entries. It also closes inherited file descriptors
 above stderr, sets umask 077, and disables core dumps. Common macOS credential
-service Mach lookups are denied while `protect_credentials` is enabled.
+service Mach lookups are denied when `protect_credentials` is enabled **and**
+`network = "deny"`. Online profiles allow native certificate/trust service access:
+blocking SecurityServer/securityd also blocks public root certificates and can
+cause TLS `UnknownIssuer` errors. Direct private-keychain file access stays denied,
+but native services can mediate access to keychain items through their APIs.
 
 Agents may need credentials to work. Explicitly keep the one required API variable
 in that agent's profile, or grant its own login state. Agent-specific state such as
 `~/.codex` and `~/.claude` is **not blocked by the built-in open deny list**, so local
-agent login state may be available. Keychain-based logins may fail. To deliberately
+agent login state may be available. Keychain-based logins may fail in offline
+profiles or where direct access to keychain files is required. To deliberately
 permit a built-in denied path/service, set `protect_credentials = false` and provide
 your own `deny` list; an allow grant cannot override a deny.
 
 ## Network and security scope
 
-`network = "allow"` permits network access. `"deny"` blocks Seatbelt network
-operations, including direct TCP/UDP and Unix-domain socket connections. There is
-no domain allowlist or managed proxy yet. Do not mistake setting `HTTPS_PROXY` for
-enforced proxying; unrestricted processes can bypass it.
+The default `network = "allow"` is deliberately permissive: all network operations
+are allowed, including DNS, TCP/UDP, Unix sockets, HTTPS, and WebSockets. Native
+macOS certificate/trust services remain accessible. TLS certificate verification
+is never disabled. Closed profiles still need explicit filesystem grants for any
+additional certificate bundles or tool runtime files they use.
+
+The default inherited environment retains `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+`NO_PROXY` and lowercase equivalents, as well as CA settings such as `SSL_CERT_FILE`,
+`SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, and
+`AWS_CA_BUNDLE`. Proxy URLs can include credentials; use `environment.drop` to
+exclude settings you do not want passed through. Closed profiles do not inherit
+these variables unless explicitly configured.
+
+`network = "deny"` blocks Seatbelt network operations, including direct TCP/UDP and
+Unix-domain socket connections. There is no domain allowlist or managed proxy yet.
+Do not mistake setting `HTTPS_PROXY` for enforced proxying; unrestricted processes
+can bypass it.
 
 Open mode is a convenience boundary around selected paths. Other secrets, copies,
 pre-existing hard links, allowed local services, inherited standard I/O, system
@@ -249,7 +272,7 @@ just release x86_64-apple-darwin
 
 Release packaging also needs Python 3. Install the matching Rust target before
 cross-compiling (`rustup target add x86_64-apple-darwin`). Archives contain the
-binary, README, license, changelog, and example profiles. Archive metadata is
+binary, README, license, changelog, example profiles, and `docs/`. Archive metadata is
 normalized so the same input bytes produce the same archive; compiler/SDK changes
 can still change the binary. Releases are unsigned and not notarized. Packaging
 does not publish, tag, or upload a release.
@@ -261,7 +284,9 @@ version, update the package version and changelog, regenerate the lockfile, run
 
 CI runs portable checks on Linux and macOS, and enforcement/packaging on macOS.
 Host tests use fake home directories and fake credentials, with a loopback listener
-for network tests. They are explicitly ignored by ordinary `cargo test`, since
+for network tests. A native Security framework probe also checks that the default
+sandbox sees the same public certificate trust settings as its host. These tests
+are explicitly ignored by ordinary `cargo test`, since
 many developer environments are already sandboxed; `just test-sandbox` treats all
 enforcement failures as failures.
 

@@ -1,6 +1,7 @@
 # Standalone profile; also built into lilbox when this file is absent.
 version = 1
 mode = "open"
+# Unrestricted sockets and native macOS certificate/trust services.
 network = "allow"
 
 [filesystem]
@@ -10,6 +11,7 @@ deny = []
 
 [environment]
 inherit = true
+# Proxy and CA certificate settings are inherited for normal HTTPS connectivity.
 # Explicitly pass an otherwise scrubbed variable, only if you trust the agent:
 # keep = ["ANTHROPIC_API_KEY"]
 keep = []

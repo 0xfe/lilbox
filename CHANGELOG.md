@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fix native macOS root certificate discovery in online profiles, which could
+  cause Codex HTTPS/WebSocket connections to fail with `UnknownIssuer`.
+- Preserve inherited proxy and CA-bundle settings for permissive networking.
+- Add offline native-certificate regression coverage while retaining direct
+  private-keychain file protection and network-deny enforcement.
+
 ## 0.1.0 — 2026-09-19
 
 - Initial macOS Seatbelt backend and portable policy/backend interface.

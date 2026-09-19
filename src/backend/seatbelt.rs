@@ -58,8 +58,10 @@ impl Backend for Seatbelt {
             Network::Deny => output.push_str("(deny network*)\n"),
         }
         if policy.mode == Mode::Closed && policy.network == Network::Allow {
-            // DNS resolver IPC; no general service lookup permission.
-            output.push_str("(allow mach-lookup (global-name \"com.apple.mDNSResponder\"))\n");
+            // DNS and native TLS trust lookup need system services as well as
+            // sockets. securityd/SecurityServer serve public roots too; blocking
+            // them causes rustls-native-certs to return an empty trust store.
+            output.push_str("(allow mach-lookup\n  (global-name \"com.apple.mDNSResponder\")\n  (global-name \"com.apple.trustd\")\n  (global-name \"com.apple.trustd.agent\")\n  (global-name \"com.apple.SecurityServer\")\n  (global-name \"com.apple.securityd\")\n  (global-name \"com.apple.securityd.xpc\"))\n");
         }
         let mut ancestors = BTreeSet::new();
         for path in &policy.deny {
@@ -82,7 +84,10 @@ impl Backend for Seatbelt {
                 quote(path)?
             )?;
         }
-        if policy.protect_credentials {
+        // Online profiles must retain native certificate discovery. These
+        // services cannot be denied wholesale while preserving that API.
+        // Direct access to credential files remains governed by filesystem rules.
+        if policy.protect_credentials && policy.network == Network::Deny {
             output.push_str("(deny mach-lookup\n  (global-name \"com.apple.SecurityServer\")\n  (global-name \"com.apple.securityd\")\n  (global-name \"com.apple.securityd.xpc\")\n  (global-name \"com.apple.security.agent\"))\n");
         }
         Ok(output)

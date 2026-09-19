@@ -1,0 +1,302 @@
+# lilbox design and implementation
+
+lilbox launches an existing agent, program, or interactive shell under an
+operating-system sandbox. The implementation is a Rust CLI with a macOS Seatbelt
+backend. It does not install agents, modify their permission settings, implement
+a container filesystem, or act as a network proxy.
+
+This document describes the current implementation. [profiles.md](profiles.md)
+is the detailed permissions reference; [README.md](../README.md) provides the
+quickstart. [plan.md](../plan.md) records implementation history and verification.
+Source links in these documents refer to the repository checkout.
+
+## Goals and boundaries
+
+- Make `lilbox codex`, `lilbox claude`, `lilbox shell`, and
+  `lilbox exec <program> [args...]` straightforward to use.
+- Provide a permissive default that protects selected credential/private paths,
+  while keeping ordinary networking, TLS, and proxy settings usable.
+- Offer a closed mode whose filesystem and runtime grants are explicit.
+- Preserve command arguments, terminal behavior, signals, and exit status.
+- Separate portable policy from OS enforcement so more backends can be added.
+- Reject invalid configuration or unavailable enforcement; never retry a failed
+  launch outside the sandbox.
+
+Open mode is a deny list, not workspace confinement or comprehensive secret
+isolation. Closed mode is only as narrow as its configured grants. In particular,
+the working directory is a grant root, not a detected Git repository root.
+
+## Module responsibilities
+
+| Component | Responsibility |
+| --- | --- |
+| [src/main.rs](../src/main.rs) | Clap CLI, profile selection, launch context, command selection, error reporting. |
+| [src/config.rs](../src/config.rs) | Strict TOML schema, defaults, validation, loading, atomic initialization. |
+| [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
+| [src/environment.rs](../src/environment.rs) | Child environment filtering, normalization, shell startup flags. |
+| [src/backend/mod.rs](../src/backend/mod.rs) | Backend interface and current-platform selection. |
+| [src/backend/seatbelt.rs](../src/backend/seatbelt.rs) | Seatbelt rendering and `sandbox-exec` command construction. |
+| [src/backend/runtime.sb](../src/backend/runtime.sb) | Explicit basic runtime capability bundle for closed profiles. |
+| [src/launch.rs](../src/launch.rs) | Scratch directory validation, process hardening, Unix process replacement. |
+| [profiles/](../profiles/) | Embedded default and isolated example TOML files. |
+
+The library exposes these modules; the binary coordinates them. `anyhow` carries
+contextual errors, Clap parses arguments, Serde/TOML parse configuration, `tempfile`
+supports initialization, and `libc` supplies Unix launch operations. `Cargo.lock`
+is tracked because lilbox is an application.
+
+## Launch flow
+
+```mermaid
+flowchart TD
+    CLI[Parse CLI] --> Action{Action}
+    Action -->|No command| Help[Print help and exit]
+    Action -->|init| Init[Create missing example profiles]
+    Action -->|Run or print policy| Config[Load and validate profile]
+    Config --> Policy[Expand paths and resolve policy]
+    Policy --> Env[Build sanitized environment]
+    Env --> Backend[Select OS backend]
+    Backend --> Inspect{Print policy?}
+    Inspect -->|Yes| Print[Render Seatbelt text and exit]
+    Inspect -->|No| Prepare[Select command and prepare scratch directory]
+    Prepare --> Harden[Clear environment, close extra FDs, set limits]
+    Harden --> Exec[Replace process with sandbox-exec]
+    Exec --> Child[Run target under inherited OS restrictions]
+```
+
+1. With no command and no `--print-policy`, help is printed successfully before
+   requiring configuration or a backend. `--version` is supplied by Clap.
+2. `HOME` must be present and absolute. The configuration directory comes from
+   `--config-dir`, otherwise nonempty absolute `XDG_CONFIG_HOME` plus `/lilbox`,
+   otherwise `~/.config/lilbox`. Relative `--config-dir` paths use the launch CWD.
+3. `init` creates missing `default.toml` and `isolated.toml` and exits. It does not
+   require an OS sandbox backend.
+4. Normal launches load the selected profile, resolve paths, protect the config
+   directory and selected profile file, and build the child environment.
+5. Backend selection currently succeeds only on macOS. `--print-policy` prints
+   resolved native rules without launching a command or creating scratch storage.
+   It cannot be combined with a command. It validates configuration/environment
+   settings, but does not ask the kernel to compile or enforce the rendered policy.
+6. A launch selects the command, prepares scratch storage if requested, and invokes
+   the backend command with the sanitized environment.
+7. On Unix, `CommandExt::exec` replaces lilbox with
+   `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>`.
+
+The policy is an argument, not a persistent generated profile file. The command
+and arguments are `OsString`s; no shell command is assembled. Non-UTF-8 command
+arguments are preserved. Policy paths must be UTF-8 because they become Seatbelt
+source text.
+
+Wrapper options belong before the command. External subcommands support arbitrary
+agent/executable names; `exec` also permits names that collide with lilbox commands.
+Arguments after the executable belong to it. Pipelines and expansion require an
+explicit shell, for example `lilbox exec /bin/sh -c 'echo hello | cat'`.
+
+## Configuration model
+
+Profile files are standalone, with no inheritance or merging between names.
+The schema requires `version = 1`. Unknown fields in every configuration table,
+unknown enum values, and unsupported versions are errors. Profile names contain
+1–64 ASCII letters, digits, underscores, or hyphens; path traversal is rejected.
+
+`default` falls back to the embedded [default.toml](../profiles/default.toml)
+only when its file is absent. Malformed files and dangling profile symlinks fail.
+Other names, including `isolated`, require a file. `init` makes them available by
+writing the embedded examples via temporary files and `persist_noclobber`.
+Existing files, including symlinks, are never overwritten.
+
+Updating the executable changes the embedded fallback and examples used for new
+files, but does not replace existing user TOML files. Existing profiles still use
+the new executable's policy renderer, environment filter, and shared deny list.
+
+`Mode`, `Network`, and resolved read/write/deny path sets form the portable policy.
+`BTreeSet` deduplicates paths and gives deterministic ordering. The environment
+is constructed separately as a `BTreeMap<OsString, OsString>`.
+
+## Filesystem resolution and precedence
+
+Paths support `~`, `${HOME}`, `${CWD}`, their slash-prefixed descendants, absolute
+paths, and launch-directory-relative paths. There is no glob engine, arbitrary
+environment expansion, or `~otheruser` lookup. Empty paths, control characters,
+non-UTF-8 paths, and `..` components fail. Rejecting `..` avoids changing its
+meaning when a preceding component is a symlink.
+
+For each path, the resolver keeps the normalized lexical spelling and its
+canonical spelling. For a nonexistent descendant, it canonicalizes the nearest
+existing ancestor and appends the remaining components. A dangling symlink or
+other resolution error fails rather than weakening the policy. This covers aliases
+such as `/tmp` and `/private/tmp`, as well as existing user-created symlinks.
+
+The effective deny set includes the profile's `filesystem.deny`, the built-in
+credential list when enabled, the selected configuration directory, and the
+selected profile file's resolved target. Protecting an individually symlinked
+profile prevents modifying its target outside the protected config directory.
+
+On macOS:
+
+- Read grants emit `file-read*` and `file-map-executable` for each subtree.
+- Write grants also emit `file-write*`; write access therefore includes reading
+  and executable mapping.
+- Each grant includes `file-read-metadata` on its ancestors, permitting traversal
+  and `getcwd` without granting recursive reads of those ancestors.
+- Denies include `file*` plus the explicit read, metadata, write, write-data,
+  unlink, executable-map, and ioctl operations used by grants. This is intentional:
+  a broad `file*` deny alone can lose to a more specific operation grant.
+- Ancestors of denied paths also deny `file-write-unlink`, preventing a parent
+  rename/removal from exposing a denied descendant under a new name.
+
+Paths are rendered with Seatbelt string escaping for quotes and backslashes.
+Control characters are rejected. Explicit denies win over lilbox's grants;
+adding an allow entry is not a way to override credential protection.
+
+Resolution is a launch-time snapshot. It does not eliminate pre-existing hard-link
+aliases or races caused by an unsandboxed process changing the filesystem.
+
+## Seatbelt backend and runtime
+
+The backend begins with `(version 1)`, followed by `(allow default)` for open mode
+or `(deny default)` for closed mode. It adds the optional basic runtime bundle,
+filesystem grants, network rules, and explicit restrictions. There is no raw SBPL
+configuration escape hatch.
+
+`runtime.basic` is an explicit capability bundle rather than an automatic
+exception to closed mode. It enables execution/fork, same-sandbox signals and
+process information, sysctl reads, directory-service lookup, root-directory
+reads, selected devices, and terminal/PTY operations. It does not grant all system
+libraries, arbitrary Mach services, or the home directory. The exact operations
+and paths are listed in [profiles.md](profiles.md#basic-runtime-grants).
+
+The shipped system read grants deliberately use `/System/Library` and
+`/System/Cryptexes`, not all of `/System`. `/System/Volumes/Data` provides an alias
+to the writable data volume and must not become an accidental broad grant.
+
+### Networking and native trust
+
+`Network::Allow` emits `(allow network*)`; `Network::Deny` emits
+`(deny network*)`. There are no endpoint, port, DNS-name, or proxy constraints.
+The default permits ordinary HTTPS and WebSockets, and environment inheritance
+preserves proxy and CA-bundle settings.
+
+macOS TLS clients may load public roots through SecurityServer/securityd.
+Blocking those services caused the system trust-domain query used by
+rustls-native-certs to fail and led to `UnknownIssuer` errors. Consequently:
+
+- Online open profiles leave native trust services available through their
+  permissive baseline.
+- Online closed profiles explicitly grant DNS, trustd, and securityd-related Mach
+  lookups. Filesystem and runtime grants still determine which applications and
+  additional CA bundles work.
+- Offline profiles with credential protection explicitly deny common credential
+  service lookups. Closed mode also denies ungranted services by default.
+
+Private-keychain files remain on the filesystem deny list. Permitting the native
+services does permit service-mediated keychain operations subject to macOS's own
+authorization; it is not a guarantee that no keychain item can be accessed.
+lilbox never fixes TLS by disabling certificate verification or replacing roots.
+
+## Environment construction
+
+The launcher clears the inherited environment and installs only the constructed
+map. Processing is ordered:
+
+1. Validate `keep`/`drop` patterns and `set` assignments. Names use letters,
+   underscores, and non-leading digits; patterns optionally end in `*`.
+2. Include inherited variables if explicitly kept, or if inheritance is enabled
+   and their names are not sensitive. Discard non-UTF-8 names. Comparisons use
+   ASCII uppercase, but retained names/values preserve their original spelling.
+3. Remove runtime injection variables unconditionally; `keep` cannot restore them,
+   and attempting to `set` them is an error.
+4. Apply explicit `set` assignments, then case-insensitive `drop` patterns.
+5. Normalize mandatory launch context: HOME, PWD, PATH, and `LILBOX=1`. Drop
+   relative/empty PATH entries, exact CWD entries, and entries containing `..`.
+   A missing PATH gets `/usr/bin:/bin:/usr/sbin:/sbin`; a supplied PATH that becomes
+   empty after filtering stays empty.
+6. Remove TMPDIR/TMP/TEMP, then set all three to the scratch directory when enabled.
+   Remove OLDPWD.
+
+Because normalization follows `drop`, mandatory context variables can reappear
+after a drop. `keep` does not synthesize absent variables. `set` can explicitly
+provide a sensitive value but should not be used to store secrets in profiles.
+Neither environment variables nor executable search paths grant filesystem access.
+See [profiles.md](profiles.md#environment-rules) for the exact filter inventory.
+
+### Interactive shells
+
+The shell is selected from the parent's nonempty `SHELL`, otherwise `/bin/zsh`,
+before environment filtering. Its path must be absolute. Zsh gets `-f -i`, Bash
+gets `--noprofile --norc -i`, Fish gets `--no-config -i`, and Sh/Dash/Ksh get `-i`
+with environment startup hooks scrubbed. Other shells require explicit `exec`.
+
+These defaults reduce accidental secret reloading from user rc files. System-wide
+startup files can still run, and extra shell arguments can change startup behavior.
+The wrapper adds no agent-specific bypass flags or nested-sandbox adjustments.
+
+## Process lifecycle and scratch storage
+
+Before entering the sandbox, the launcher creates `~/.cache/lilbox/tmp` when
+requested. New directories request mode 0700. An existing final path must be a
+directory, not a symlink, owned by the effective user, without group/other
+permission bits. Existing permissions are validated rather than silently changed.
+
+Scratch storage is persistent and shared across profiles and invocations for the
+same home directory. There is no per-run cleanup supervisor. Explicit denies can
+still prevent access to this directory despite the scratch grant.
+
+The single-threaded launcher enumerates `/dev/fd` before its `pre_exec` hook. The
+hook performs only system calls: sets umask 077, sets both core-dump limits to zero,
+and closes inherited descriptors above 2. Keeping allocation and directory I/O
+outside the hook avoids unsafe work in the process-launch callback.
+
+Descriptors 0–2 and the terminal are preserved. File descriptors opened by the
+target after launch are governed by the sandbox. Successful process replacement
+leaves no lilbox parent that must forward signals or translate exit codes.
+Configuration/launch errors are printed with a `lilbox:` prefix and exit 1;
+subsequent `sandbox-exec`/target failures retain their own status.
+
+## Verification and distribution
+
+Portable unit/CLI tests cover parsing, environment precedence, paths and aliases,
+temporary-directory validation, initialization, argument forwarding, help, and
+version output. The host suite covers actual read/write restrictions, symlinks,
+ancestor renames, metadata precedence, TCP/Unix sockets, descendants, descriptors,
+exit/signals, and terminal behavior.
+
+The [native trust probe](../tests/fixtures/trust_roots.c) uses the Security and
+CoreFoundation frameworks to compare public trust settings inside and outside
+the default sandbox without contacting a server. The test reports counts/errors,
+not private keys or passwords.
+
+`just check` runs formatting, warning-free Clippy, and portable tests.
+`just verify` additionally runs the ignored macOS host suite. That suite must run
+from a host permitting `sandbox-exec`; nested sandbox initialization may be denied.
+Do not interpret ordinary `cargo test` as proof of Seatbelt enforcement.
+
+`Cargo.toml` supplies the version. `just release` uses
+[scripts/release.sh](../scripts/release.sh) to build a locked release for the native
+macOS target or an explicitly selected Apple Silicon/Intel target. It writes a
+versioned tarball and SHA-256 sidecar in `dist/`. Archives include the executable,
+README, license, changelog, profiles, and these docs. File order, ownership, modes,
+timestamps, and gzip headers are normalized; reproducibility assumes identical
+compiled input bytes. Packaging does not sign, notarize, tag, or publish releases.
+
+CI runs portable checks on Linux and macOS, with enforcement and packaging on
+macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
+
+## Extending the system
+
+`Backend` currently exposes `render(&Policy)` and `command(&Policy)` returning
+fallible results. Add future OS implementations behind this interface and update
+platform selection. They must enforce every requested policy feature or reject
+the request. A backend must never silently ignore a restriction or launch without
+confinement. Process hardening also needs an implementation appropriate to the OS.
+
+Future network/proxy modes belong in the typed configuration and policy, with
+backend validation and tests. A managed proxy would additionally require broker
+startup, readiness, environment configuration, direct-connection restrictions,
+and lifecycle management. The current process-replacement launcher does not
+implement that lifecycle. Setting a proxy environment variable alone does not
+enforce proxy use.
+
+Keep this document and [profiles.md](profiles.md) synchronized with implementation
+changes. Profile behavior comes from code as well as TOML; a renderer or environment
+change can alter every installed profile without changing its file.

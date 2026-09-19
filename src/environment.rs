@@ -47,6 +47,11 @@ fn injection_variable(name: &str) -> bool {
 }
 
 fn sensitive(name: &str) -> bool {
+    // This is a public trust-bundle path, not an AWS credential. Other common
+    // CA variables and proxy settings likewise pass through inherited environments.
+    if name == "AWS_CA_BUNDLE" {
+        return false;
+    }
     [
         "TOKEN",
         "SECRET",
@@ -86,11 +91,6 @@ fn sensitive(name: &str) -> bool {
                 | "DATABASE_URL"
                 | "REDIS_URL"
                 | "HF_TOKEN"
-                | "HTTP_PROXY"
-                | "HTTPS_PROXY"
-                | "ALL_PROXY"
-                | "FTP_PROXY"
-                | "NO_PROXY"
         )
 }
 
@@ -222,7 +222,7 @@ mod tests {
             ("SSH_AUTH_SOCK", "/socket"),
             ("github_token", "secret"),
             ("DATABASE_URL", "secret"),
-            ("HTTPS_PROXY", "secret"),
+            ("HTTPS_PROXY", "http://127.0.0.1:8080"),
             ("NODE_OPTIONS", "--require evil.js"),
             ("BASH_ENV", "evil.sh"),
             ("TERM", "xterm"),
@@ -243,7 +243,6 @@ mod tests {
             "SSH_AUTH_SOCK",
             "github_token",
             "DATABASE_URL",
-            "HTTPS_PROXY",
             "NODE_OPTIONS",
             "BASH_ENV",
         ] {
@@ -276,6 +275,44 @@ mod tests {
         ] {
             let p = crate::config::parse(&format!("version=1\n[environment]\n{settings}")).unwrap();
             assert!(build(&p, &paths(), source()).is_err());
+        }
+    }
+
+    #[test]
+    fn inherits_proxy_and_ca_settings_but_respects_explicit_drops() {
+        let source: Vec<(OsString, OsString)> = [
+            ("HTTP_PROXY", "http://proxy.example:8080"),
+            ("HTTPS_PROXY", "http://proxy.example:8080"),
+            ("ALL_PROXY", "socks5://proxy.example:1080"),
+            ("NO_PROXY", "localhost,127.0.0.1"),
+            ("https_proxy", "http://proxy.example:8080"),
+            ("no_proxy", "localhost"),
+            ("SSL_CERT_FILE", "/certs/roots.pem"),
+            ("SSL_CERT_DIR", "/certs"),
+            ("NODE_EXTRA_CA_CERTS", "/certs/node.pem"),
+            ("REQUESTS_CA_BUNDLE", "/certs/python.pem"),
+            ("CURL_CA_BUNDLE", "/certs/curl.pem"),
+            ("AWS_CA_BUNDLE", "/certs/aws.pem"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let profile = crate::config::parse(crate::config::DEFAULT_PROFILE).unwrap();
+        let result = build(&profile, &paths(), source.clone()).unwrap();
+        for (key, value) in &source {
+            assert_eq!(result.get(key), Some(value), "{key:?}");
+        }
+        let profile =
+            crate::config::parse("version=1\n[environment]\ndrop=['HTTPS_PROXY', 'AWS_CA_BUNDLE']")
+                .unwrap();
+        let result = build(&profile, &paths(), source.clone()).unwrap();
+        for key in ["HTTPS_PROXY", "https_proxy", "AWS_CA_BUNDLE"] {
+            assert!(!result.contains_key(OsStr::new(key)));
+        }
+        let profile = crate::config::parse("version=1\nmode='closed'").unwrap();
+        let result = build(&profile, &paths(), source.clone()).unwrap();
+        for (key, _) in source {
+            assert!(!result.contains_key(&key));
         }
     }
 }

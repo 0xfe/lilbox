@@ -64,6 +64,7 @@ impl Fixture {
         fs::write(self.config.join(format!("{name}.toml")), text).unwrap();
     }
 }
+#[track_caller]
 fn succeeds(output: &Output) {
     assert!(
         output.status.success(),
@@ -73,6 +74,7 @@ fn succeeds(output: &Output) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+#[track_caller]
 fn denied(output: &Output) {
     assert!(
         !output.status.success(),
@@ -354,4 +356,50 @@ fn interactive_shell_retains_a_terminal_in_both_modes() {
             String::from_utf8_lossy(&output.stdout)
         );
     }
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn default_profile_preserves_native_tls_trust_roots() {
+    let f = Fixture::new();
+    let probe = f.work.join("trust-roots");
+    succeeds(
+        &Command::new("/usr/bin/cc")
+            .args([
+                "-Werror",
+                "-Wno-deprecated-declarations",
+                "-framework",
+                "Security",
+                "-framework",
+                "CoreFoundation",
+            ])
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/trust_roots.c"
+            ))
+            .arg("-o")
+            .arg(&probe)
+            .output()
+            .unwrap(),
+    );
+    let baseline = Command::new(&probe).env("HOME", &f.home).output().unwrap();
+    succeeds(&baseline);
+    let sandboxed = f.run("default", &[probe.to_str().unwrap()]);
+    succeeds(&sandboxed);
+    assert_eq!(
+        sandboxed.stdout, baseline.stdout,
+        "sandbox changed native certificate availability"
+    );
+    // Restoring service access must not grant direct access to private keychain
+    // files. Native services can independently mediate access through their APIs.
+    let keychains = f.home.join("Library/Keychains");
+    fs::create_dir_all(&keychains).unwrap();
+    fs::write(keychains.join("fake.keychain"), "fake private material").unwrap();
+    denied(&f.run(
+        "default",
+        &[
+            "/bin/cat",
+            keychains.join("fake.keychain").to_str().unwrap(),
+        ],
+    ));
 }
