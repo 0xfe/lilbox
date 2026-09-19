@@ -1,6 +1,17 @@
 # lilbox
 
-A small Rust wrapper for running coding agents and commands inside an OS sandbox.
+A small wrapper for running coding agents and untrusted commands inside an OS
+sandbox. The default profile ensures that agents don't have access to sensitive
+files, such as: `~/.ssh`, `~/.aws` etc. and environment variables (like API keys.)
+
+Think of it as an *outer sandbox* which serves as a defense in depth along with
+other isolation mechanisms, particularly those bundled with agent harnesses.
+
+```sh
+# Run codex inside lilbox with the default profile
+lilbox codex
+```
+
 Version **0.1.0** supports **macOS** through Seatbelt (`sandbox-exec`). Linux and
 Windows execution deliberately fail until a backend is implemented.
 
