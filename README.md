@@ -12,7 +12,7 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.3.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+Version **0.3.1** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
 through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
 refuse execution.
 
@@ -33,7 +33,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose a prefix or a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s -- --prefix /usr/local --version 0.3.0
+curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s -- --prefix /usr/local --version 0.3.1
 ```
 
 The prefix must be writable; the installer never invokes sudo. It verifies the
@@ -105,7 +105,7 @@ The version from `Cargo.toml` is baked into the binary and appears in help and
 prints a compact summary to stderr:
 
 ```text
-  lilbox 0.3.0
+  lilbox 0.3.1
   ├ profile  default
   └ command  cargo test
 ```

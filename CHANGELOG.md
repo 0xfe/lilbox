@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 — 2026-11-08
+
+- Add `just bump [VERSION]` and `just release [VERSION]` with stable-version
+  validation and checks against existing local tags, remote tags, and GitHub
+  releases. Version preparation updates the manifest, lockfile, README, and
+  changelog; commit and push remain manual.
+- Initialize missing starter profiles after binary installation without
+  overwriting existing configs or symlinks. Show a colored box logo, config and
+  executable locations, PATH setup, quick-start commands, and recovery guidance
+  when initialization fails.
+- Test installation with real native binaries, including config preservation,
+  custom config locations, failure recovery, terminal colors, and PATH quoting.
+
 ## 0.3.0 — 2026-11-08
 
 - Start Linux sandboxes in a new session so interactive shells preserve their
