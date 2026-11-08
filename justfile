@@ -20,17 +20,21 @@ lint:
 test:
     cargo test --locked
 
-# Actual Seatbelt enforcement; must run on an unsandboxed macOS host.
+# Actual host enforcement; requires sandbox-exec or Linux bubblewrap/namespaces.
 test-sandbox:
     #!/bin/sh
     set -eu
-    test "$(uname -s)" = Darwin || { echo 'Seatbelt tests require macOS' >&2; exit 1; }
-    cargo test --locked --test seatbelt -- --ignored --test-threads=1
+    case "$(uname -s)" in
+        Darwin) suite=seatbelt ;;
+        Linux) suite=bubblewrap ;;
+        *) echo 'Sandbox tests require macOS or Linux' >&2; exit 1 ;;
+    esac
+    cargo test --locked --test "$suite" -- --ignored --test-threads=1
 
 # All portable checks.
 check: lint test
 
-# Full release verification including macOS enforcement.
+# Full verification including the current platform's enforcement.
 verify: check test-sandbox
 
 # Install in ~/.local/bin, or choose a different prefix: just install /usr/local.
@@ -46,7 +50,7 @@ install prefix=(env_var("HOME") + "/.local"):
 run *args:
     cargo run --locked -- "$@"
 
-# Versioned macOS archive + SHA-256 checksum in dist/; optional Rust target.
+# Versioned macOS/Linux archive + SHA-256 checksum in dist/; optional Rust target.
 release target="":
     bash scripts/release.sh "$1"
 

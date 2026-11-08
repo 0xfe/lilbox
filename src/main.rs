@@ -117,7 +117,14 @@ fn run() -> Result<()> {
             let shell = std::env::var_os("SHELL")
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
-                .unwrap_or_else(|| "/bin/zsh".into());
+                .unwrap_or_else(|| {
+                    if cfg!(target_os = "macos") {
+                        "/bin/zsh"
+                    } else {
+                        "/bin/sh"
+                    }
+                    .into()
+                });
             let mut command = environment::shell_command(&shell)?;
             command.extend(args);
             command

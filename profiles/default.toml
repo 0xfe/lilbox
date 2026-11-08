@@ -1,7 +1,7 @@
 # Standalone profile; also built into lilbox when this file is absent.
 version = 1
 mode = "open"
-# Unrestricted sockets and native macOS certificate/trust services.
+# Unrestricted sockets; native macOS trust services / Linux system CA reads.
 network = "allow"
 
 [filesystem]

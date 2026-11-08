@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
+CDPATH= cd -- "$(dirname "$0")/.."
 
-if [[ $(uname -s) != Darwin ]]; then
-    echo 'Release packaging currently requires macOS.' >&2
+if [[ $(uname -s) != Darwin && $(uname -s) != Linux ]]; then
+    echo 'Release packaging requires macOS or Linux.' >&2
     exit 1
 fi
 target=${1:-$(rustc -vV | sed -n 's/^host: //p')}
 case "$target" in
-    aarch64-apple-darwin|x86_64-apple-darwin) ;;
+    aarch64-apple-darwin|x86_64-apple-darwin|aarch64-unknown-linux-gnu|x86_64-unknown-linux-gnu|aarch64-unknown-linux-musl|x86_64-unknown-linux-musl) ;;
     *) echo "Unsupported release target: $target" >&2; exit 1 ;;
 esac
 
@@ -30,6 +30,7 @@ cp -R examples "$stage/$name/examples"
 # Python 3 is available with the macOS developer tools needed to build Rust.
 python3 - "$stage" "$name" "dist/$name.tar.gz" <<'PY'
 import gzip
+import hashlib
 import pathlib
 import sys
 import tarfile
@@ -49,9 +50,12 @@ with open(destination, "wb") as raw:
                         archive.addfile(info, source)
                 else:
                     archive.addfile(info)
-PY
-(
-    cd dist
-    shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+digest = hashlib.sha256()
+with open(destination, "rb") as archive:
+    for chunk in iter(lambda: archive.read(1024 * 1024), b""):
+        digest.update(chunk)
+pathlib.Path(destination + ".sha256").write_text(
+    digest.hexdigest() + "  " + pathlib.Path(destination).name + "\n"
 )
+PY
 echo "Created dist/$name.tar.gz and dist/$name.tar.gz.sha256"

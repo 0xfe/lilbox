@@ -1,4 +1,4 @@
-use super::Backend;
+use super::{Backend, SandboxCommand};
 use crate::{
     config::{Mode, Network},
     policy::Policy,
@@ -93,7 +93,7 @@ impl Backend for Seatbelt {
         Ok(output)
     }
 
-    fn command(&self, policy: &Policy) -> Result<Command> {
+    fn command(&self, policy: &Policy) -> Result<SandboxCommand> {
         if !cfg!(target_os = "macos") {
             bail!("Seatbelt requires macOS");
         }
@@ -102,7 +102,7 @@ impl Backend for Seatbelt {
         }
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.arg("-p").arg(self.render(policy)?).arg("--");
-        Ok(command)
+        Ok(command.into())
     }
 }
 

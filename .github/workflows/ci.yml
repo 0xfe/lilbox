@@ -18,17 +18,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install Linux sandbox and test dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap python3 ca-certificates
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
       - name: Real Seatbelt enforcement
         if: runner.os == 'macOS'
         run: cargo test --locked --test seatbelt -- --ignored --test-threads=1
-      - name: Package macOS release
-        if: runner.os == 'macOS'
+      - name: Real bubblewrap enforcement
+        if: runner.os == 'Linux'
+        run: cargo test --locked --test bubblewrap -- --ignored --test-threads=1
+      - name: Package release
         run: bash scripts/release.sh
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS'
         with:
           name: lilbox-${{ matrix.os }}
           path: dist/*

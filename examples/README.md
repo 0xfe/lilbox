@@ -68,3 +68,9 @@ exact key. Empty lists do not erase inherited entries, and deny/drop rules win.
 Use [the configuration guide](../README.md#profiles) and
 [the complete permissions reference](../docs/profiles.md) when adapting these
 examples. Run `lilbox check` from the intended working directory after editing.
+
+On Linux these profiles use bubblewrap. Missing deny paths require read-only
+directory entries in their nearest existing parent, which `check` reports as
+warnings and `check --strict` treats as failures. Review those warnings before use;
+see [Linux permissions](../docs/profiles.md#linux-bubblewrap-permissions). The
+workspace profiles include system library/configuration grants for both OSes.

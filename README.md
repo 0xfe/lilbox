@@ -12,8 +12,9 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.1.0** supports **macOS** through Seatbelt (`sandbox-exec`). Linux and
-Windows execution deliberately fail until a backend is implemented.
+Version **0.2.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
+refuse execution.
 
 See [the design](docs/design.md) for implementation details and
 [the profile reference](docs/profiles.md) for exact permissions and environment
@@ -21,8 +22,11 @@ rules. Contributor instructions are in [AGENTS.md](AGENTS.md).
 
 ## Quickstart
 
-You need Rust/Cargo (1.85+), [Just](https://github.com/casey/just), and macOS with
-`/usr/bin/sandbox-exec`. Install your agent separately.
+You need Rust/Cargo (1.85+), [Just](https://github.com/casey/just), and either macOS
+with `/usr/bin/sandbox-exec` or Linux with `/usr/bin/bwrap` (bubblewrap 0.6.3 or
+newer), user namespaces, and seccomp enabled. On Debian/Ubuntu, install it with
+`sudo apt-get install bubblewrap`. Install your agent separately. Linux host tests
+also need Python 3 and the system CA certificate package.
 
 From this source directory:
 
@@ -41,7 +45,7 @@ lilbox exec cargo test        # run any executable
 No configuration is required. The default allows broad filesystem and network
 access while blocking common credential/private paths and scrubbing sensitive
 environment variables. It is **not workspace-only**: ordinary files outside the
-current directory remain writable.
+current directory remain writable, subject to the Linux restrictions below.
 
 To configure profiles:
 
@@ -81,7 +85,7 @@ lilbox exec /bin/sh -c 'find . -name "*.rs" | wc -l'
 lilbox --config-dir ./my-profiles -p review exec git diff
 ```
 
-`shell` uses `$SHELL` (defaults to `/bin/zsh`). Zsh uses `-f`, Bash uses
+`shell` uses `$SHELL` (defaults to `/bin/zsh` on macOS and `/bin/sh` on Linux). Zsh uses `-f`, Bash uses
 `--noprofile --norc`, and Fish uses `--no-config`. Sh, Dash, and Ksh have their
 startup environment hooks removed. System-wide startup files may still execute;
 explicit extra shell arguments can re-enable startup behavior. Other shells can
@@ -153,7 +157,7 @@ mode = "closed"
 network = "deny"
 
 [filesystem]
-allow_read = ["/System/Library", "/System/Cryptexes", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc"]
+allow_read = ["/System/Library", "/System/Cryptexes", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc", "/etc/resolv.conf", "/lib", "/lib64"]
 allow_write = ["${CWD}"]
 deny = ["${CWD}/secrets"]
 
@@ -268,8 +272,9 @@ Assignment values are omitted from semantic diagnostics.
 Errors return status 1; warnings alone return 0 unless `--strict` is used. Run the
 check from the intended working directory, because `${CWD}` and relative paths
 are contextual. It does not create files, run agents, or launch a sandbox.
-It validates policy rendering on macOS; other systems report that execution is
-unsupported. Static analysis cannot prove kernel enforcement, network/TLS
+It validates policy rendering and launcher presence on macOS/Linux; other systems
+report that execution is unsupported. Linux also reports read-only parents needed
+for missing deny paths. A closed Linux profile requires `runtime.basic = true`. Static analysis cannot prove kernel enforcement, network/TLS
 connectivity, or that a particular agent has every resource it needs.
 
 ## Credential protection and authentication
@@ -319,7 +324,10 @@ exclude settings you do not want passed through. Closed profiles do not inherit
 these variables unless explicitly configured.
 
 `network = "deny"` blocks Seatbelt network operations, including direct TCP/UDP and
-Unix-domain socket connections. There is no domain allowlist or managed proxy yet.
+Unix-domain socket connections. Linux uses a private network namespace and a
+syscall filter to block socket creation (including Unix sockets); route-netlink
+inside that private namespace remains available for bubblewrap loopback setup.
+There is no domain allowlist or managed proxy yet.
 Do not mistake setting `HTTPS_PROXY` for enforced proxying; unrestricted processes
 can bypass it.
 
@@ -344,17 +352,63 @@ macOS may reject nested Seatbelt sandboxes with `sandbox_apply: Operation not
 permitted`. Start lilbox from an ordinary terminal. Agents that create an inner
 sandbox may need their sandbox settings adjusted; lilbox does not change those
 settings automatically. Unsupported OSes, invalid policies, and missing
-`sandbox-exec` fail without retrying outside confinement.
+`sandbox-exec`/`bwrap` fail without retrying outside confinement. Linux namespace,
+seccomp, AppArmor, or container restrictions can also prevent startup; the failing
+launcher diagnostic is preserved.
+
+## Linux filesystem and runtime differences
+
+Bubblewrap applies mount-based restrictions. Existing denied directories and files
+are replaced with inaccessible, read-only empty mounts; their original contents
+remain untouched. Denied paths' existing ancestors are mountpoints, preventing
+renames. Symlink targets and inherited profile files remain protected.
+
+A **missing denied path** cannot be masked without creating a host mountpoint.
+lilbox instead makes its nearest existing parent read-only and rebinds existing
+allowed children with their original access. This prevents creating the denied
+name, but also prevents new siblings, deletion/renaming of children, and atomic
+file replacement in that parent. Existing allowed files can be edited in place;
+existing allowed subdirectories can accept new files. For example, if `.env` is
+absent, the default profile restricts directory entry changes at the workspace
+root. Run `lilbox check` to see every affected parent. lilbox never creates fake
+credential files to avoid this limitation. For a different boundary, use a custom
+profile with `protect_credentials = false` and an explicitly reviewed deny list;
+configuration protection always remains active.
+
+Closed mode starts with an empty filesystem and binds only granted paths. The
+starter profile includes Linux `/etc`, `/lib`, and `/lib64` reads as well as the
+macOS paths. Absent read grants are omitted; a separate absent write root is
+unavailable until created outside the sandbox (scratch is prepared automatically).
+Existing user profiles are not rewritten by an upgrade.
+
+Both modes use private user/PID/IPC/UTS namespaces, a private `/proc`, minimal
+`/dev`, and an empty read-only `/sys`. Capabilities are dropped, and seccomp blocks
+namespace/mount manipulation, ptrace/process-memory access, kernel keyrings, and
+terminal injection. The filter also blocks io_uring, whose socket operations
+could bypass ordinary socket syscall filtering. `clone3` returns `ENOSYS` so runtimes can use ordinary `clone`.
+Closed profiles without `runtime.basic = true`, explicit policy paths inside
+`/proc`, `/dev`, or `/sys`, and unsupported syscall architectures are rejected.
+Ordinary processes and threads still work; nested sandbox tools may require
+configuration changes. The filter is a focused set of restrictions, not a full
+syscall allowlist. Standard I/O remains inherited; online profiles can reach host
+Unix services through allowed filesystem paths. Certificate verification stays
+on and system CA files remain readable under the starter system grants.
+
+`--print-policy` displays quoted bubblewrap arguments and the syscall-filter
+summary. Descriptor placeholders are filled at launch; it is an inspection format,
+not a standalone shell command. Bubblewrap supervises a private PID namespace and
+propagates target exit codes (signal deaths return `128 + signal`). Other host namespaces and kernel resources are not
+a VM or a separate user account.
 
 ## Development and releases
 
 ```sh
 just                          # list recipes
 just check                    # formatting, Clippy, unit and CLI tests
-just test-sandbox             # real enforcement, unsandboxed macOS host required
+just test-sandbox             # real enforcement for the current macOS/Linux host
 just verify                   # both sets of checks
 just run --print-policy
-just release                  # native macOS archive and SHA-256 checksum in dist/
+just release                  # native macOS/Linux archive and checksum in dist/
 just release x86_64-apple-darwin
 ```
 
@@ -368,9 +422,10 @@ does not publish, tag, or upload a release.
 `Cargo.toml` is the version source; `Cargo.lock` is included. To release a new
 version, update the package version and changelog, regenerate the lockfile, run
 `just verify`, then `just release`. Verify an archive from its directory with
-`shasum -a 256 -c lilbox-VERSION-TARGET.tar.gz.sha256`.
+`shasum -a 256 -c lilbox-VERSION-TARGET.tar.gz.sha256` on macOS or
+`sha256sum -c lilbox-VERSION-TARGET.tar.gz.sha256` on Linux.
 
-CI runs portable checks on Linux and macOS, and enforcement/packaging on macOS.
+CI runs portable checks, host enforcement, and packaging on Linux and macOS.
 Host tests use fake home directories and fake credentials, with a loopback listener
 for network tests. A native Security framework probe also checks that the default
 sandbox sees the same public certificate trust settings as its host. These tests

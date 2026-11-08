@@ -3,8 +3,9 @@
 ## Project overview
 
 lilbox is a Rust CLI that launches coding agents, arbitrary commands, and shells
-inside an OS sandbox. macOS Seatbelt (`/usr/bin/sandbox-exec`) is the only execution
-backend currently implemented. Unsupported platforms must refuse execution.
+inside an OS sandbox. Execution backends are macOS Seatbelt
+(`/usr/bin/sandbox-exec`) and Linux bubblewrap (`/usr/bin/bwrap`, x86_64/aarch64).
+Unsupported platforms and syscall ABIs must refuse execution.
 
 The default profile is intentionally permissive, especially for networking, with
 specific credential/private filesystem denies and environment scrubbing. The
@@ -25,11 +26,16 @@ is a historical implementation/verification record.
 - `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
 - `src/environment.rs`: environment filtering/normalization and shell arguments.
-- `src/backend/`: backend interface, Seatbelt rendering, and basic runtime SBPL.
+- `src/backend/`: backend interface, Seatbelt rendering/runtime SBPL, and Linux
+  bubblewrap mount planning plus seccomp filtering.
 - `src/launch.rs`: private scratch directory and hardened Unix process replacement.
 - `profiles/`: shipped TOML files embedded into the executable.
 - `examples/`: annotated standalone/inherited profiles; validate with
   `just run --config-dir examples check --strict` when changing the gallery.
+  On Linux, review expected missing-deny parent warnings as well; strict mode
+  intentionally fails on those filesystem-dependent warnings.
+- `tests/bubblewrap.rs`: actual Linux enforcement; needs bubblewrap 0.6.3+,
+  permitted user namespaces/seccomp, Python 3, and public CA certificates.
 - `tests/seatbelt.rs`: actual macOS enforcement tests; `tests/fixtures/trust_roots.c`
   checks native certificate discovery without network access or private keys.
 
@@ -64,13 +70,14 @@ do not modify real credentials or user profiles as test fixtures.
 
 ```sh
 just check                    # formatting, Clippy -D warnings, portable tests
-just test-sandbox             # macOS host enforcement tests
+just test-sandbox             # current macOS/Linux host enforcement tests
 just verify                   # check + test-sandbox
 ```
 
 For changes to permissions, path handling, environment rules, process launch, or
 TLS/network behavior, add meaningful regression coverage and run `just verify`
-on a host that permits `sandbox-exec`. The enforcement tests are intentionally
+on a host that permits the applicable backend (`sandbox-exec` or bubblewrap
+user namespaces/seccomp). The enforcement tests are intentionally
 ignored by ordinary `cargo test`; they must be run explicitly. Nested Seatbelt
 initialization can fail with `sandbox_apply: Operation not permitted`. Report
 that limitation instead of silently skipping failures or claiming enforcement
@@ -80,6 +87,8 @@ For release-specific launch changes, the optimized enforcement suite is:
 
 ```sh
 cargo test --release --locked --test seatbelt -- --ignored --test-threads=1
+# On Linux:
+cargo test --release --locked --test bubblewrap -- --ignored --test-threads=1
 ```
 
 For documentation-only changes, verify links, commands, and consistency with the
@@ -106,6 +115,11 @@ contents change. Finish with `git diff --check` and review the diff.
   retain secret/injection filtering and explicit drop precedence.
 - Do not imply that private-keychain file denial blocks all service-mediated
   keychain access. Document the actual boundary.
+- On Linux, preserve missing-path deny protection without creating host
+  placeholders: read-only parents and their diagnostics are intentional. Apply
+  mounts parent-first and denies last; preserve canonical symlink semantics.
+- Linux network deny must block Unix sockets as well as TCP/UDP. A network
+  namespace alone is insufficient. Keep syscall ABI checks and descriptor ownership.
 - Keep allocation/locking out of the `pre_exec` callback; descriptor enumeration
   relies on the current single-threaded launch design.
 - Avoid broad `/System` grants that expose `/System/Volumes/Data`.
@@ -118,19 +132,18 @@ release, refresh `Cargo.lock`, and keep version references in README consistent.
 ```sh
 just version
 just verify
-just release                         # native macOS target
+just release                         # native macOS/Linux target
 just release x86_64-apple-darwin       # matching Rust target must be installed
 ```
 
-`scripts/release.sh` supports Apple Silicon and Intel macOS, builds with locked
+`scripts/release.sh` supports ARM64 and x86_64 macOS/Linux (GNU or musl on Linux), builds with locked
 dependencies, and writes versioned archives/checksums in `dist/`. Archives include
 the executable, README, license, changelog, profiles, `examples/`, and `docs/`. Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
 Packaging is local: it does not sign, notarize, tag, or publish a release.
 `target/` and `dist/` are ignored build outputs.
 
-CI runs portable checks on Linux/macOS and host enforcement plus packaging on
-macOS. Do not claim an unexecuted platform or CI run was verified.
+CI runs portable checks, host enforcement, and packaging on Linux/macOS. Do not claim an unexecuted platform or CI run was verified.
 
 ## Documentation must stay current
 

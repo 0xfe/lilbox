@@ -17,6 +17,11 @@ pub const CREDENTIAL_PATHS: &[&str] = &[
     "~/.config/hub",
     "~/.config/op",
     "~/.local/share/keyrings",
+    "~/.local/share/kwalletd",
+    "~/.config/1Password",
+    "~/.config/google-chrome",
+    "~/.config/chromium",
+    "~/.mozilla",
     "~/.password-store",
     "~/.docker/config.json",
     "~/.netrc",
@@ -147,7 +152,7 @@ pub fn path_aliases(path: &Path) -> Result<BTreeSet<PathBuf>> {
     Ok(BTreeSet::from([lexical, canonical]))
 }
 
-fn canonicalize_future(path: &Path) -> Result<PathBuf> {
+pub(crate) fn canonicalize_future(path: &Path) -> Result<PathBuf> {
     match fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

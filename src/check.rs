@@ -224,25 +224,36 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
                 ),
             }
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             match backend::current().and_then(|b| b.render(&policy)) {
                 Ok(_) => {}
                 Err(error) => report.add(
                     Severity::Error,
                     &name,
-                    format!("Seatbelt rendering: {error:#}"),
+                    format!("sandbox rendering: {error:#}"),
                 ),
             }
-            if !Path::new("/usr/bin/sandbox-exec").is_file() {
+            let launcher = if cfg!(target_os = "macos") {
+                "/usr/bin/sandbox-exec"
+            } else {
+                "/usr/bin/bwrap"
+            };
+            if !Path::new(launcher).is_file() {
                 report.add(
                     Severity::Error,
                     &name,
-                    "macOS launcher /usr/bin/sandbox-exec is missing",
+                    format!("sandbox launcher {launcher} is missing"),
                 );
+            }
+            #[cfg(target_os = "linux")]
+            if let Ok(parents) = backend::bubblewrap::restricted_parents(&policy) {
+                for parent in parents {
+                    report.add(Severity::Warning, &name, format!("bubblewrap: absent denied paths require read-only directory entries in {}; existing allowed children retain access, but new siblings and atomic replacement are blocked", parent.display()));
+                }
             }
         }
     }
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
         report.add(
             Severity::Warning,
             "platform",

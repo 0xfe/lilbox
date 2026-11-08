@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-08
+
+- Add Linux bubblewrap execution on x86_64 and aarch64, with private process/device
+  views, filesystem denies, offline socket filtering, and fail-closed startup.
+  Missing denied paths conservatively restrict directory entry changes in their
+  nearest existing parent; `check` reports these restrictions.
+- Add Linux system grants to starter profiles, Linux credential locations,
+  host enforcement tests, CI coverage, and Linux release packaging.
 
 - Add annotated example profiles for standalone, inherited, offline, and online
   configurations, with usage instructions and inclusion in release archives.

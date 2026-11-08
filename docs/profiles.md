@@ -6,8 +6,9 @@ It must be updated whenever configuration, filesystem rules, environment filters
 network/trust handling, runtime capabilities, or launch behavior change.
 
 For architecture and implementation details, see [design.md](design.md). Rules
-below describe what lilbox permits; normal filesystem permissions and macOS
-authorization still apply. Installed profiles can differ from these examples.
+below describe what lilbox permits; normal filesystem permissions and host
+authorization still apply. Seatbelt-specific operations below apply to macOS;
+Linux differences are detailed in the next section. Installed profiles can differ from these examples.
 
 ## Selection and inspection
 
@@ -27,8 +28,73 @@ inheritance rules below; both shipped profiles remain standalone.
 
 `init` preserves existing files. Installing a new lilbox does not rewrite user
 TOML, but changes to shared policy code still affect existing profiles.
-`--print-policy` shows resolved Seatbelt rules for the current home/CWD; it neither
-launches a process nor prints the child environment or asks macOS to enforce them.
+`--print-policy` shows resolved Seatbelt rules or quoted bubblewrap arguments
+with descriptor placeholders and a syscall-filter summary for the current
+home/CWD. It neither launches a process nor prints the child environment or asks
+the kernel to enforce the policy.
+
+## Linux bubblewrap permissions
+
+Linux x86_64/aarch64 uses `/usr/bin/bwrap` (0.6.3 or newer), with required user,
+PID, IPC, and UTS namespaces and seccomp. Missing support is a launch failure.
+Open mode exposes the host root except the restrictions below. Closed mode uses
+only explicit grants plus runtime mounts, and requires `runtime.basic = true`;
+profiles requesting closed execution without that capability are rejected.
+
+Filesystem denies apply after grants. Existing denied directories/files become
+empty, mode-000, read-only mounts; original bytes are neither read nor changed.
+Their mountpoint names/metadata may still be visible. Ancestors of denied paths
+are pinned as mountpoints wherever the host directory is exposed, preventing
+renames. Lexical symlinks resolve to protected canonical targets; inherited profile
+files receive the same protection. As with macOS, pre-existing hard links or
+cooperating unsandboxed filesystem changes are outside the boundary.
+
+**Missing denies restrict their nearest existing writable parent.** That parent
+is mounted read-only, with existing allowed children rebound to retain their
+original read/write access. Creating, deleting, renaming, or atomically replacing
+its direct children is blocked, including all new sibling names. Existing allowed
+files remain writable in place; existing allowed subdirectories can accept new
+files. Thus an absent workspace `.env` restricts changes to directory entries at
+the workspace root. `check` emits a warning for each affected parent (`--strict`
+fails on these warnings). No placeholder files or directories are created on the
+host. This is deliberately more restrictive than Seatbelt's future-path denies.
+For a different policy, disable built-in credential protection in a custom profile
+and supply a reviewed deny list; configuration protection cannot be disabled.
+
+Closed read grants are read-only mounts; writes include reads and execution.
+Write grants win over overlapping read grants. Absent read grants expose nothing;
+absent standalone write roots must be created outside the sandbox before use.
+An existing writable ancestor permits future children, subject to denies. Scratch
+is created and validated automatically before mount planning. Synthetic ancestors
+and the closed filesystem root are read-only. Grants do not rewrite user TOML.
+
+Both modes replace host `/proc` with a view of sandbox processes, use bubblewrap's
+minimal `/dev` (standard devices, fd links, and private PTYs), and hide `/sys` behind
+an empty read-only mount. Explicit grants/denies inside these reserved trees are
+rejected. Capabilities are dropped. The seccomp filter rejects other syscall ABIs,
+x32, namespace creation/mount changes, ptrace/process-memory access, open-by-handle,
+kernel keyring access, BPF, io_uring (including its alternate socket operations),
+and terminal injection ioctls. Ordinary process/thread
+creation is allowed; `clone3` returns ENOSYS to permit runtime fallback to `clone`.
+This is not a comprehensive syscall allowlist or a VM. Nested sandbox tools can
+fail under these restrictions.
+
+Online mode shares host networking, including accessible host Unix sockets.
+Offline mode uses a private network namespace and blocks creation of TCP, UDP,
+Unix, and other sockets, including socketpairs. Route-netlink inside that private
+namespace remains available because bubblewrap configures loopback after applying
+the filter. Inherited standard I/O is preserved and must not carry an unwanted
+network capability. System CA files under the starter `/etc` and `/usr` grants
+remain readable; custom CA files need their own grants. Public certificate
+verification is never disabled. Desktop services reachable through online Unix
+sockets can still mediate access to secrets; file denial alone does not prevent it.
+
+Linux inherits the shared environment/umask/core-limit rules. Only backend-owned
+anonymous filter/mask descriptors survive lilbox's descriptor cleanup; bubblewrap
+consumes them before target execution. Bubblewrap supervises the PID namespace and
+preserves target exit codes; signal deaths return `128 + signal`. Linux `shell` falls back to `/bin/sh` when SHELL is
+unset. Other platforms' detailed runtime bundles below should not be read as a
+claim that Linux implements macOS Mach services or sysctl policy.
 
 ## Shipped profile comparison
 
@@ -107,7 +173,10 @@ its descendants, with lexical/canonical aliases resolved at launch:
 | `/bin` | Basic executables. |
 | `/sbin` | Basic system executables. |
 | `/Library/Apple` | Apple-provided runtime resources. |
-| `/private/etc` | System configuration files. |
+| `/private/etc` | macOS system configuration files. |
+| `/etc` | Linux system configuration and CA bundles (an alias of `/private/etc` on macOS). |
+| `/etc/resolv.conf` | Includes its canonical target when resolver configuration is symlinked outside `/etc`. |
+| `/lib`, `/lib64` | Linux loaders/libraries; existing symlink targets are included. Absent paths on the other OS grant nothing. |
 
 The profile does not grant all of `/System`; `/System/Volumes/Data` exposes the
 data volume. `/opt/homebrew` is not part of the shipped read list. A path's presence
@@ -180,6 +249,7 @@ matches itself and its descendants; file entries are not special-cased as files.
 | GPG and password stores | `~/.gnupg`, `~/.password-store`, `~/.local/share/keyrings`, `~/.config/op` |
 | Git hosting and stored credentials | `~/.config/gh`, `~/.config/hub`, `~/.git-credentials` |
 | Tool/service credentials | `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.vault-token`, `~/.terraform.d/credentials.tfrc.json` |
+| Linux desktop credentials/browser data | `~/.local/share/kwalletd`, `~/.config/1Password`, `~/.config/google-chrome`, `~/.config/chromium`, `~/.mozilla` |
 | Private folder | `~/Private` |
 | macOS Keychains / 1Password | `~/Library/Keychains`, `~/Library/Group Containers/2BUA8C4S2C.com.1password`, `~/Library/Application Support/1Password` |
 | Browsers | `~/Library/Application Support/Google/Chrome`, `~/Library/Application Support/Firefox`, `~/Library/Safari` |
@@ -277,7 +347,7 @@ close inherited descriptors above 2, set umask 077, and disable core dumps. All
 descendants remain subject to OS sandbox enforcement. Inherited standard I/O can
 itself expose data; it is deliberately preserved for interactive use.
 
-`lilbox shell` selects the parent SHELL (default `/bin/zsh`) before filtering the
+`lilbox shell` selects the parent SHELL (default `/bin/zsh` on macOS, `/bin/sh` on Linux) before filtering the
 child environment. Zsh/Bash/Fish receive no-user-startup flags; Sh/Dash/Ksh receive
 interactive mode with environment startup hooks removed. System startup files and
 explicit extra arguments can still affect startup. The shell path must also be
@@ -311,7 +381,7 @@ supported, but dangling symlinks and other resolution failures are errors.
 Adding an allow entry never cancels an explicit deny. To intentionally replace the
 built-in deny list, disable `protect_credentials` and supply your own restrictions.
 Review the resulting native policy from the intended working directory and use
-the real macOS enforcement tests for changes to these semantics.
+the real host enforcement tests for changes to these semantics.
 
 ## Inherited profiles
 

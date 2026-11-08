@@ -75,11 +75,14 @@ pub fn execute(
     argv: &[OsString],
     environment: ChildEnvironment,
 ) -> Result<()> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     if argv.is_empty() || argv[0].is_empty() {
         bail!("missing command");
     }
-    let mut command = backend.command(policy)?;
+    let mut prepared = backend.command(policy)?;
+    let command = &mut prepared.command;
+    let preserved: Vec<i32> = prepared.files.iter().map(AsRawFd::as_raw_fd).collect();
     command.args(argv).env_clear().envs(environment);
     // Enumerate before pre_exec: no allocation, locks, or directory I/O in that
     // callback. lilbox is single-threaded and opens no files after this point.
@@ -91,7 +94,7 @@ pub fn execute(
                 .file_name()
                 .to_str()
                 .and_then(|s| s.parse::<i32>().ok())
-                .filter(|fd| *fd > 2))
+                .filter(|fd| *fd > 2 && !preserved.contains(fd)))
         })
         .collect::<Result<Vec<_>>>()?
         .into_iter()
@@ -110,6 +113,11 @@ pub fn execute(
             }
             for fd in &descriptors {
                 libc::close(*fd);
+            }
+            for fd in &preserved {
+                if libc::fcntl(*fd, libc::F_SETFD, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });

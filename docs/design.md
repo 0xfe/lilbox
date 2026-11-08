@@ -1,9 +1,9 @@
 # lilbox design and implementation
 
 lilbox launches an existing agent, program, or interactive shell under an
-operating-system sandbox. The implementation is a Rust CLI with a macOS Seatbelt
-backend. It does not install agents, modify their permission settings, implement
-a container filesystem, or act as a network proxy.
+operating-system sandbox. The implementation is a Rust CLI with macOS Seatbelt
+and Linux bubblewrap backends. It does not install agents, modify their permission
+settings, or act as a network proxy. Bubblewrap constructs a mount namespace.
 
 This document describes the current implementation. [profiles.md](profiles.md)
 is the detailed permissions reference; [README.md](../README.md) provides the
@@ -37,6 +37,8 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/environment.rs](../src/environment.rs) | Child environment filtering, normalization, shell startup flags. |
 | [src/backend/mod.rs](../src/backend/mod.rs) | Backend interface and current-platform selection. |
 | [src/backend/seatbelt.rs](../src/backend/seatbelt.rs) | Seatbelt rendering and `sandbox-exec` command construction. |
+| [src/backend/bubblewrap.rs](../src/backend/bubblewrap.rs) | Linux mount planning, validation, read-only diagnostics, and bubblewrap command construction. |
+| [src/backend/bubblewrap/seccomp.rs](../src/backend/bubblewrap/seccomp.rs) | Native-ABI syscall filtering for Linux x86_64/aarch64. |
 | [src/backend/runtime.sb](../src/backend/runtime.sb) | Explicit basic runtime capability bundle for closed profiles. |
 | [src/launch.rs](../src/launch.rs) | Scratch directory validation, process hardening, Unix process replacement. |
 | [profiles/](../profiles/) | Embedded default and isolated example TOML files. |
@@ -58,10 +60,10 @@ flowchart TD
     Policy --> Env[Build sanitized environment]
     Env --> Backend[Select OS backend]
     Backend --> Inspect{Print policy?}
-    Inspect -->|Yes| Print[Render Seatbelt text and exit]
+    Inspect -->|Yes| Print[Render native policy and exit]
     Inspect -->|No| Prepare[Select command and prepare scratch directory]
     Prepare --> Harden[Clear environment, close extra FDs, set limits]
-    Harden --> Exec[Replace process with sandbox-exec]
+    Harden --> Exec[Replace process with sandbox launcher]
     Exec --> Child[Run target under inherited OS restrictions]
 ```
 
@@ -75,14 +77,15 @@ flowchart TD
    scratch storage. Neither command requires an OS execution backend.
 4. Normal launches load the selected profile, resolve paths, protect the config
    directory and every inherited profile file, and build the child environment.
-5. Backend selection currently succeeds only on macOS. `--print-policy` prints
+5. Backend selection succeeds on macOS and Linux. `--print-policy` prints
    resolved native rules without launching a command or creating scratch storage.
    It cannot be combined with a command. It validates configuration/environment
    settings, but does not ask the kernel to compile or enforce the rendered policy.
 6. A launch selects the command, prepares scratch storage if requested, and invokes
    the backend command with the sanitized environment.
 7. On Unix, `CommandExt::exec` replaces lilbox with
-   `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>`.
+   `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>` or
+   `/usr/bin/bwrap <mount/namespace/filter arguments> -- <program> <args...>`.
 
 The policy is an argument, not a persistent generated profile file. The command
 and arguments are `OsString`s; no shell command is assembled. Non-UTF-8 command
@@ -174,7 +177,8 @@ no `NO_COLOR`, and a TERM other than `dumb`; glyphs and severity labels remain i
 redirected output. Errors return status 1, warnings return 0 unless `--strict` is
 used. CLI argument errors retain Clap's status 2.
 
-On macOS, check validates Seatbelt rendering and launcher presence. On other systems,
+On macOS/Linux, check validates native rendering and launcher presence. Linux
+also warns about conservative read-only parents for absent denies. On other systems,
 portable configuration analysis works with an unsupported-execution warning.
 It never starts a process or modifies configuration/scratch storage. It cannot
 prove kernel enforcement, verify TLS connectivity or certificate contents, or
@@ -263,6 +267,46 @@ services does permit service-mediated keychain operations subject to macOS's own
 authorization; it is not a guarantee that no keychain item can be accessed.
 lilbox never fixes TLS by disabling certificate verification or replacing roots.
 
+## Linux bubblewrap backend
+
+[The Linux permissions section](profiles.md#linux-bubblewrap-permissions) defines
+the platform differences. The backend shares resolved paths and environment rules
+with Seatbelt, and uses an absolute `/usr/bin/bwrap` path. Missing launchers or
+namespace/filter setup failures never fall back to direct execution.
+
+Open mode binds the host root read/write. Closed mode starts from bubblewrap's
+empty root and mounts existing canonical grant roots, preserving lexical symlink
+components such as `/lib -> usr/lib`. Write grants dominate read grants. Existing
+grant roots and visible deny ancestors are combined in one parent-first mount
+order so an ancestor bind cannot undo a child grant or rename pin. Runtime mounts
+replace `/proc`, `/dev`, and `/sys`; explicit paths inside those trees are rejected.
+Closed mode requires basic runtime and remounts the synthetic root read-only.
+
+Existing denies are applied last as inaccessible read-only empty directories or
+files. Nested denies are collapsed. Missing denies make their nearest existing
+writable parent read-only, then rebind its existing allowed children with their
+original access. Those mounts are integrated into the same parent-first order.
+This reserves missing names without host placeholders, at the cost of restricting
+all directory entry changes in that parent. Check and print-policy plan these
+mounts without writing files. Missing grants are omitted or use `--bind-try`;
+launch prepares the configured scratch directory before planning its mounts.
+
+The backend emits a classic BPF seccomp program for x86_64 or aarch64. Other ABIs
+and x32 syscall numbers are rejected. Both modes deny namespace/mount operations,
+process-memory/ptrace access, keyrings, BPF, io_uring, open-by-handle, and terminal
+injection. Blocking io_uring prevents its socket operations bypassing seccomp.
+Namespace flags on clone are blocked; clone3 returns ENOSYS for ordinary clone
+fallback. Offline mode adds a network namespace and denies socket/socketpair,
+except route-netlink needed by bubblewrap's loopback setup within that namespace.
+Online mode keeps the host network namespace and socket access. No CA replacement
+or TLS-verification bypass is involved.
+
+Filter and empty-mask payloads are anonymous memory files. Their owning File
+objects live through process replacement; only those descriptors are exempt from
+inherited-descriptor closing. Each file mask gets its own descriptor because
+bubblewrap consumes it. Rendering shows descriptor placeholders and a filter
+summary. The launch still passes arguments directly, never through a shell.
+
 ## Environment construction
 
 The launcher clears the inherited environment and installs only the constructed
@@ -291,7 +335,7 @@ See [profiles.md](profiles.md#environment-rules) for the exact filter inventory.
 
 ### Interactive shells
 
-The shell is selected from the parent's nonempty `SHELL`, otherwise `/bin/zsh`,
+The shell is selected from the parent's nonempty `SHELL`, otherwise `/bin/zsh` on macOS or `/bin/sh` on Linux,
 before environment filtering. Its path must be absolute. Zsh gets `-f -i`, Bash
 gets `--noprofile --norc -i`, Fish gets `--no-config -i`, and Sh/Dash/Ksh get `-i`
 with environment startup hooks scrubbed. Other shells require explicit `exec`.
@@ -313,14 +357,17 @@ still prevent access to this directory despite the scratch grant.
 
 The single-threaded launcher enumerates `/dev/fd` before its `pre_exec` hook. The
 hook performs only system calls: sets umask 077, sets both core-dump limits to zero,
-and closes inherited descriptors above 2. Keeping allocation and directory I/O
+and closes inherited descriptors above 2, except the explicitly owned
+bubblewrap filter/mask descriptors. Those are marked inheritable for this exec and
+consumed by bubblewrap before it executes the target. Keeping allocation and directory I/O
 outside the hook avoids unsafe work in the process-launch callback.
 
 Descriptors 0–2 and the terminal are preserved. File descriptors opened by the
 target after launch are governed by the sandbox. Successful process replacement
 leaves no lilbox parent that must forward signals or translate exit codes.
+Bubblewrap itself supervises the private PID namespace and target.
 Configuration/launch errors are printed with a `lilbox:` prefix and exit 1;
-subsequent `sandbox-exec`/target failures retain their own status.
+subsequent sandbox-launcher/target failures retain their own status.
 
 ## Verification and distribution
 
@@ -336,25 +383,29 @@ the default sandbox without contacting a server. The test reports counts/errors,
 not private keys or passwords.
 
 `just check` runs formatting, warning-free Clippy, and portable tests.
-`just verify` additionally runs the ignored macOS host suite. That suite must run
-from a host permitting `sandbox-exec`; nested sandbox initialization may be denied.
-Do not interpret ordinary `cargo test` as proof of Seatbelt enforcement.
+`just verify` additionally runs the ignored host suite for the current OS.
+macOS needs a host permitting `sandbox-exec`; Linux needs bubblewrap, user
+namespaces, seccomp, Python 3, and public CA certificates. Nested sandbox
+initialization may be denied. Ordinary `cargo test` does not prove enforcement.
 
 `Cargo.toml` supplies the version. `just release` uses
 [scripts/release.sh](../scripts/release.sh) to build a locked release for the native
-macOS target or an explicitly selected Apple Silicon/Intel target. It writes a
+macOS/Linux target or an explicitly selected supported target (macOS ARM64/x86_64,
+Linux ARM64/x86_64 GNU or musl). The target toolchain/linker must be installed;
+bubblewrap is a runtime system dependency and is not bundled. It writes a
 versioned tarball and SHA-256 sidecar in `dist/`. Archives include the executable,
-README, license, changelog, shipped profiles, the `examples/` gallery, and these docs. File order, ownership, modes,
-timestamps, and gzip headers are normalized; reproducibility assumes identical
+README, license, changelog, shipped profiles, the `examples/` gallery, and these docs. Python also writes the SHA-256 sidecar without a platform-specific checksum tool.
+File order, ownership, modes, timestamps, and gzip headers are normalized; reproducibility assumes identical
 compiled input bytes. Packaging does not sign, notarize, tag, or publish releases.
 
-CI runs portable checks on Linux and macOS, with enforcement and packaging on
-macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
+CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 
 ## Extending the system
 
-`Backend` currently exposes `render(&Policy)` and `command(&Policy)` returning
-fallible results. Add future OS implementations behind this interface and update
+`Backend` exposes `render(&Policy)` and `command(&Policy)` returning fallible
+results. Command construction returns `SandboxCommand`, owning a `Command` and
+any descriptors needed by the launcher. Seatbelt needs no descriptors; Linux uses
+anonymous memory files for its filter and each empty file mask. Add future OS implementations behind this interface and update
 platform selection. They must enforce every requested policy feature or reject
 the request. A backend must never silently ignore a restriction or launch without
 confinement. Process hardening also needs an implementation appropriate to the OS.

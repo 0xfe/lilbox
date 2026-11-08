@@ -42,7 +42,7 @@ fn initializes_without_overwriting_and_rejects_bad_profiles() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn unsupported_platform_never_launches_command() {
     let root = tempfile::tempdir().unwrap();
@@ -106,7 +106,7 @@ fn check_selected_chain_reports_conflicts_and_strict_exit_status() {
     let config = root.path().join("config");
     fs::create_dir(&config).unwrap();
     fs::write(config.join("unrelated.toml"), "broken").unwrap();
-    fs::write(config.join("work.toml"), "version=1\nextends='default'\nmode='closed'\n[filesystem]\nallow_read=['~/.ssh']\n[environment]\nkeep=['OPENAI_*','NODE_OPTIONS']\ndrop=['OPENAI_API_KEY','HOME']\nset={OPENAI_API_KEY='DO_NOT_PRINT_SECRET',HOME='/fake'}").unwrap();
+    fs::write(config.join("work.toml"), "version=1\nextends='default'\nmode='closed'\n[filesystem]\nallow_read=['~/.ssh']\n[environment]\nkeep=['OPENAI_*','NODE_OPTIONS']\ndrop=['OPENAI_API_KEY','HOME']\nset={OPENAI_API_KEY='DO_NOT_PRINT_SECRET',HOME='/fake'}\n[runtime]\nbasic=true").unwrap();
     let output = check_fixture(root.path())
         .args(["-p", "work", "check"])
         .output()
@@ -216,4 +216,32 @@ fn inherited_errors_prevent_execution_and_report_text_escapes_controls() {
     assert!(!text.contains('\x1b'));
     assert!(!text.contains("\nforged"));
     assert!(text.contains("\\u{1b}"), "{text}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unsupported_linux_policies_fail_in_check_preview_and_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    for source in [
+        "version=1\nmode='closed'",
+        "version=1\n[filesystem]\nallow_read=['/proc']",
+        "version=1\n[filesystem]\ndeny=['/']",
+    ] {
+        fs::write(config.join("bad.toml"), source).unwrap();
+        for args in [
+            vec!["check"],
+            vec!["--print-policy"],
+            vec!["exec", "/bin/sh", "-c", "echo escaped > MUST_NOT_EXIST"],
+        ] {
+            let output = check_fixture(root.path())
+                .args(["-p", "bad"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+        }
+        assert!(!root.path().join("MUST_NOT_EXIST").exists());
+    }
 }
