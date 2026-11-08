@@ -2,6 +2,9 @@
 
 ## 0.3.0 — 2026-11-08
 
+- Start Linux sandboxes in a new session so interactive shells preserve their
+  exit status instead of failing to restore a host terminal process group.
+  Standard terminal I/O is retained; host terminal job control is unavailable.
 - Add manually requested GitHub binary releases through `just release`, with
   native tests and verified archives for Apple Silicon/Intel macOS and
   ARM64/x86_64 Linux. Pushes and pull requests run CI without publishing.

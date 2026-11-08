@@ -371,10 +371,16 @@ bubblewrap filter/mask descriptors. Those are marked inheritable for this exec a
 consumed by bubblewrap before it executes the target. Keeping allocation and directory I/O
 outside the hook avoids unsafe work in the process-launch callback.
 
-Descriptors 0–2 and the terminal are preserved. File descriptors opened by the
+Descriptors 0–2 are preserved. File descriptors opened by the
 target after launch are governed by the sandbox. Successful process replacement
 leaves no lilbox parent that must forward signals or translate exit codes.
 Bubblewrap itself supervises the private PID namespace and target.
+It uses `--new-session` to detach the host controlling terminal while preserving
+standard-I/O descriptors. Host process groups are not visible in the private PID
+namespace; inheriting that session caused interactive dash to fail during exit
+cleanup. The new session preserves terminal I/O and shell exit codes, but host
+terminal job control and controlling `/dev/tty` access are not promised. macOS
+retains its original terminal session.
 Configuration/launch errors are printed with a `lilbox:` prefix and exit 1;
 subsequent sandbox-launcher/target failures retain their own status.
 

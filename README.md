@@ -121,6 +121,8 @@ lilbox exec /bin/sh -c 'find . -name "*.rs" | wc -l'
 ```
 
 `shell` uses `$SHELL`, falling back to `/bin/zsh` on macOS or `/bin/sh` on Linux.
+Linux preserves terminal I/O but runs in a new session without host terminal job
+control; shells may print a job-control warning.
 See [shell startup behavior](docs/design.md#interactive-shells) for flags and limits.
 
 ## Profiles

@@ -117,6 +117,10 @@ fn arguments(
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
+        // The host's terminal process group is outside the PID namespace.
+        // Detach its controlling session while retaining the stdio descriptors;
+        // otherwise interactive dash can fail restoring an invisible group.
+        "--new-session",
         "--cap-drop",
         "ALL",
     ]

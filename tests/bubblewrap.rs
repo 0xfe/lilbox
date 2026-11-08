@@ -361,23 +361,32 @@ _, status = os.waitpid(pid, 0)
 sys.exit(os.waitstatus_to_exitcode(status))
 "#;
     for profile in ["default", "isolated"] {
-        let output = Command::new("/usr/bin/python3")
-            .args(["-c", script, env!("CARGO_BIN_EXE_lilbox"), "--config-dir"])
-            .arg(&f.config)
-            .args([
-                "-p",
-                profile,
-                "shell",
-                "-c",
-                "test -t 0 && test -t 1 && echo TTY_OK",
-            ])
-            .env_clear()
-            .env("HOME", &f.home)
-            .env("PATH", "/usr/bin:/bin")
-            .env("SHELL", "/bin/sh")
-            .current_dir(&f.work)
-            .output()
-            .unwrap();
-        assert!(succeeds(output).contains("TTY_OK"));
+        // Exercise both normal shell cleanup and an explicit nonzero exit.
+        // Inheriting the host controlling session made dash return 2 on exit
+        // even after printing TTY_OK, because its original process group was
+        // invisible inside the sandbox's PID namespace.
+        for (source, expected_status) in [
+            ("test -t 0 && test -t 1 && echo TTY_OK", 0),
+            ("test -t 0 && test -t 1 || exit 99; echo TTY_OK; exit 7", 7),
+        ] {
+            let output = Command::new("/usr/bin/python3")
+                .args(["-c", script, env!("CARGO_BIN_EXE_lilbox"), "--config-dir"])
+                .arg(&f.config)
+                .args(["-p", profile, "shell", "-c", source])
+                .env_clear()
+                .env("HOME", &f.home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("SHELL", "/bin/sh")
+                .current_dir(&f.work)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(expected_status), "{output:?}");
+            let terminal = String::from_utf8(output.stdout).unwrap();
+            assert!(terminal.contains("TTY_OK"), "{terminal}");
+            assert!(
+                !terminal.contains("Cannot set tty process group"),
+                "{terminal}"
+            );
+        }
     }
 }

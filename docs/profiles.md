@@ -94,6 +94,7 @@ these warnings.
 | Resource | Behavior in both modes |
 | --- | --- |
 | Namespaces | Private user, PID, IPC, and UTS namespaces. |
+| Terminal session | New session; inherited standard I/O remains open, but the host controlling terminal is detached. |
 | `/proc` | Shows sandbox processes. |
 | `/dev` | Standard devices, fd links, and private PTYs. |
 | `/sys` | Empty, read-only mount. |
@@ -138,6 +139,12 @@ for the cross-platform boundary.
 | Process lifecycle | Bubblewrap supervises the PID namespace and preserves exit codes; signal deaths return `128 + signal`. |
 | Shell fallback | `/bin/sh` when `SHELL` is unset. |
 | `--print-policy` | Quoted arguments and a syscall-filter summary. Descriptor placeholders make this an inspection format, not a standalone shell command. |
+
+Linux uses bubblewrap's `--new-session` so interactive shells do not try to
+restore a host process group that is invisible inside the private PID namespace.
+Terminal input/output through inherited descriptors still works, including TTY
+detection, but host terminal job control is unavailable. Shells may report that
+job control is disabled; programs requiring a controlling `/dev/tty` may fail.
 
 The Seatbelt runtime tables below describe macOS operations, not Linux Mach
 services or sysctl policy.
