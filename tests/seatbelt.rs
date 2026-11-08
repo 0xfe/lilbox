@@ -96,6 +96,7 @@ fn startup_display_reports_version_profile_and_command_on_stderr() {
         let output = Command::new(env!("CARGO_BIN_EXE_lilbox"))
             .env_clear()
             .env("HOME", &f.home)
+            .env("TERM", "xterm-256color")
             .current_dir(&f.work)
             .arg("--config-dir")
             .arg(&f.config)
@@ -125,6 +126,42 @@ fn startup_display_reports_version_profile_and_command_on_stderr() {
     succeeds(&output);
     assert!(output.stderr.is_empty());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("(version 1)"));
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn startup_display_colors_follow_terminal_settings() {
+    let f = Fixture::new();
+    for profile in ["default", "isolated"] {
+        for (term, no_color, colored) in [
+            ("xterm-256color", false, true),
+            ("xterm-256color", true, false),
+            ("dumb", false, false),
+        ] {
+            let mut command = Command::new("/usr/bin/script");
+            command
+                .env_clear()
+                .env("HOME", &f.home)
+                .env("TERM", term)
+                .current_dir(&f.work)
+                .args([
+                    "-q",
+                    "/dev/null",
+                    env!("CARGO_BIN_EXE_lilbox"),
+                    "--config-dir",
+                ])
+                .arg(&f.config)
+                .args(["-p", profile, "exec", "/usr/bin/true"]);
+            if no_color {
+                command.env("NO_COLOR", "");
+            }
+            let output = command.output().unwrap();
+            succeeds(&output);
+            let banner = String::from_utf8(output.stdout).unwrap();
+            assert!(banner.contains(&format!("lilbox {}", env!("CARGO_PKG_VERSION"))));
+            assert_eq!(banner.contains('\x1b'), colored, "{banner:?}");
+        }
+    }
 }
 
 #[test]

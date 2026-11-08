@@ -223,6 +223,16 @@ mod tests {
 
     #[test]
     fn arguments_after_program_are_opaque() {
+        for prefix in [vec!["lilbox", "codex"], vec!["lilbox", "exec", "codex"]] {
+            for flag in ["-v", "-V", "--version"] {
+                let cli = Cli::try_parse_from(prefix.iter().copied().chain([flag])).unwrap();
+                let command = match cli.command.unwrap() {
+                    Action::Agent(command) | Action::Exec { command } => command,
+                    other => panic!("unexpected action: {other:?}"),
+                };
+                assert_eq!(command, ["codex", flag].map(OsString::from));
+            }
+        }
         let cli = Cli::try_parse_from([
             "lilbox",
             "-p",
