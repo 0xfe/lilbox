@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — 2026-11-08
+
+- Add manually requested GitHub binary releases through `just release`, with
+  native tests and verified archives for Apple Silicon/Intel macOS and
+  ARM64/x86_64 Linux. Pushes and pull requests run CI without publishing.
+- Add a curl-compatible installer with platform detection, SHA-256 verification,
+  optional version/prefix selection, and atomic executable replacement. Linux
+  release binaries use static musl; bubblewrap remains a system dependency.
+- Rename local-only archive creation to `just package`.
+- Show the embedded version in help and support `-v`, `-V`, and `--version`.
+  Display the selected profile and escaped command on stderr before launching,
+  with terminal colors respecting `NO_COLOR` and `TERM=dumb`.
+
 ## 0.2.0 — 2026-11-08
 
 - Add Linux bubblewrap execution on x86_64 and aarch64, with private process/device

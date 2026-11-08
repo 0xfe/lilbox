@@ -1,0 +1,93 @@
+name: Verify and package
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  automation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate workflows and shell scripts
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          GOBIN="$RUNNER_TEMP/tools" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$RUNNER_TEMP/tools/actionlint" -color
+          shellcheck install.sh scripts/release.sh scripts/request-release.sh
+  test:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            suite: seatbelt
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            suite: seatbelt
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            suite: bubblewrap
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            suite: bubblewrap
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+      SUITE: ${{ matrix.suite }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - name: Install Linux build and sandbox dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools python3 ca-certificates
+      - name: Formatting, lint, and portable tests
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --target "$TARGET" --all-targets --all-features -- -D warnings
+          cargo test --locked --target "$TARGET"
+          bash -n scripts/release.sh
+          bash -n scripts/request-release.sh
+          sh -n install.sh
+          python3 scripts/test_release.py
+      - name: Real host enforcement
+        run: cargo test --locked --target "$TARGET" --test "$SUITE" -- --ignored --test-threads=1
+      - name: Optimized release enforcement
+        if: inputs.release
+        run: cargo test --release --locked --target "$TARGET" --test "$SUITE" -- --ignored --test-threads=1
+      - name: Package and verify extracted executable
+        run: |
+          bash scripts/release.sh "$TARGET"
+          python3 scripts/verify-archive.py dist/*.tar.gz
+      - name: Verify Linux binary has no dynamic interpreter
+        if: runner.os == 'Linux'
+        run: |
+          headers=$(readelf -l "target/$TARGET/release/lilbox")
+          if grep -q INTERP <<< "$headers"; then
+            echo 'Published Linux binaries must be statically linked.' >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lilbox-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

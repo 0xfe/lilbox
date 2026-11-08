@@ -10,7 +10,7 @@ and [design.md](design.md) for module responsibilities.
 | Build and portable checks | Rust/Cargo 1.85+, rustfmt, Clippy, and Just. Use current stable without raising the declared minimum. |
 | macOS enforcement | A host permitting `/usr/bin/sandbox-exec`; developer tools for the C certificate probe. |
 | Linux enforcement | `/usr/bin/bwrap` 0.6.3+, permitted user namespaces and seccomp, Python 3, and public CA certificates. |
-| Release packaging | Python 3 and the target's Rust toolchain/linker. |
+| Release packaging | Python 3.9+ and the target's Rust toolchain/linker. |
 
 ## Everyday commands
 
@@ -28,9 +28,10 @@ and [design.md](design.md) for module responsibilities.
 
 | Command | Coverage |
 | --- | --- |
-| `just check` | Formatting, Clippy with warnings denied, unit tests, and CLI tests. |
+| `just check` | Formatting, Clippy with warnings denied, unit/CLI tests, and offline installer/release-script tests. |
 | `just test-sandbox` | Actual enforcement on the current host OS. |
 | `just verify` | Both sets of checks. |
+| `just test-release` | Offline installer and release-request regressions; Python 3.9+ required. |
 
 Host tests use temporary homes and fake credentials. They cover filesystem denies,
 symlinks, ancestor renames, networking, descendants, descriptors, signals, and
@@ -54,32 +55,72 @@ cargo test --release --locked --test seatbelt -- --ignored --test-threads=1
 cargo test --release --locked --test bubblewrap -- --ignored --test-threads=1
 ```
 
-CI is configured to run portable checks, host enforcement, and packaging on Linux
-and macOS. A successful local run does not verify other platforms or remote CI.
+CI runs on every push and pull request. The shared
+[verification workflow](../.github/workflows/verify.yml) uses native ARM64 and
+x86_64 runners on both macOS and Linux. Each job checks formatting, Clippy, unit
+and CLI tests, installer/release-script tests, real sandbox enforcement, and the
+packaged executable. CI uploads temporary Actions artifacts; it never creates
+GitHub releases. A successful local run does not verify other platforms or remote CI.
 
-## Build a release
+## Publish a release
 
-1. Update the version in `Cargo.toml` and the release entry in `CHANGELOG.md`.
-2. Refresh `Cargo.lock` and keep README version references consistent.
-3. Run `just verify` and any required optimized enforcement tests.
-4. Build the archive:
+1. Update `Cargo.toml`, refresh `Cargo.lock`, and update `CHANGELOG.md` and README.
+2. Run `just verify`, then commit and push the changes to `main`.
+3. Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`
+   using an account permitted to run this repository's Actions workflows.
+4. Run:
+
+```sh
+just release
+```
+
+[`scripts/request-release.sh`](../scripts/request-release.sh) requires a clean
+checkout on `main`, checks that HEAD equals the live `origin/main`, rejects an
+existing version tag, and dispatches the
+[release workflow](../.github/workflows/release.yml) with the exact commit and
+version. It does not commit or push your changes. The workflow must first be
+present on GitHub's default branch (`main`).
+
+Only this explicit `workflow_dispatch` publishes: pushes, tags, and pull requests
+do not request releases. The Actions UI can also dispatch the same workflow with
+the full main commit SHA and version. If main moves before dispatch, validation
+fails; synchronize and request again.
+
+The release workflow repeats the full four-platform verification and adds
+optimized host enforcement tests. After every job succeeds, it verifies the
+complete archive/checksum set and creates `vVERSION` at the tested commit,
+attaches all four archives, their SHA-256 files, and `install.sh`, and publishes
+the GitHub release as latest. Builds have read-only repository permissions; only
+the final publication job has `contents: write`, using GitHub's built-in token.
+No personal publishing token is needed. Repository rules must permit the workflow
+token to create release tags. A failed upload can leave a draft; inspect it before
+retrying. An existing tag/release is never overwritten automatically.
+
+```sh
+gh run list --workflow release.yml
+gh run watch RUN_ID
+```
+
+## Build a local archive
 
 ```sh
 just version
-just release                         # native target
-just release x86_64-apple-darwin       # explicit target
+just package                         # native target; no publication
+just package x86_64-apple-darwin       # explicit target
 ```
 
 [`scripts/release.sh`](../scripts/release.sh) supports these targets:
 
-| OS | Architectures | Target families |
+| OS | Published targets | Additional local targets |
 | --- | --- | --- |
-| macOS | ARM64, x86_64 | `apple-darwin` |
-| Linux | ARM64, x86_64 | `unknown-linux-gnu`, `unknown-linux-musl` |
+| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | None |
+| Linux | `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` | The corresponding `unknown-linux-gnu` targets |
 
-Install the matching Rust target and linker before cross-compiling; for example,
-`rustup target add x86_64-apple-darwin` installs the Rust target. Bubblewrap remains
-a system runtime dependency and is not bundled.
+The published Linux binaries use musl static linking so they work on glibc and
+musl distributions without requiring the build runner's glibc version. Bubblewrap
+remains a system runtime dependency and is not bundled. Install the matching Rust
+target and linker before local cross-compilation; for example,
+`rustup target add x86_64-apple-darwin` installs that Rust target.
 
 ## Verify the archive
 
@@ -99,7 +140,9 @@ sha256sum -c lilbox-VERSION-TARGET.tar.gz.sha256
 
 Then extract and smoke-test the executable on a matching host, using temporary
 home/config directories. Confirm the archive includes the executable, README,
-license, changelog, `profiles/`, `examples/`, and `docs/`.
+license, changelog, `install.sh`, `profiles/`, `examples/`, and `docs/`.
+The automated host check is `python3 scripts/verify-archive.py dist/ARCHIVE.tar.gz`;
+it verifies checksums, contents, version flags, and launches with both profiles.
 
 | Packaging property | Behavior |
 | --- | --- |
@@ -107,7 +150,28 @@ license, changelog, `profiles/`, `examples/`, and `docs/`.
 | Archive metadata | File order, ownership, modes, timestamps, and gzip headers are normalized. |
 | Reproducibility | Identical input bytes produce identical archives; compiler/SDK changes can change the binary. |
 | Signing | Archives are unsigned and not notarized. |
-| Publishing | `just release` does not commit, tag, publish, or upload. |
+| Publishing | `just package` is local only; `just release` explicitly requests GitHub publication. |
+
+## Binary installer
+
+[`install.sh`](../install.sh) defaults to the latest stable GitHub release and
+`~/.local/bin`. `--version X.Y.Z` (optionally prefixed with `v`) pins a release;
+`--prefix /absolute/path` installs to `PREFIX/bin`. The script works with POSIX
+`sh`, including when piped from curl, and needs curl, tar, mktemp, and either
+sha256sum or shasum. It supports the four published targets above and refuses
+other operating systems/architectures.
+
+Downloads use HTTPS. Before replacement, the installer checks the archive hash,
+extracts only the executable, and verifies its embedded version. A temporary file
+in the destination directory permits atomic replacement; failed downloads/checks
+leave an existing installation intact. Destination symlinks/directories are
+rejected. No sudo, profile initialization, shell startup edits, or system package
+installation is performed. Missing Linux bubblewrap is reported with installation
+instructions; kernel restrictions must still allow actual execution.
+
+Checksums detect damaged or mismatched downloads; they are distributed from the
+same GitHub release and are not an independent signing trust root. macOS binaries
+are unsigned and not notarized.
 
 ## Extend lilbox
 

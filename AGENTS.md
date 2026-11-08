@@ -49,8 +49,8 @@ be represented explicitly and either enforced or rejected by each backend.
 Use Rust/Cargo, rustfmt, Clippy, and Just. `Cargo.toml` declares edition 2024 and
 the minimum Rust version; keep `Cargo.lock` tracked. Use the current stable
 toolchain for routine development without silently raising the declared minimum.
-macOS host tests need developer tools for the C certificate probe. Release
-packaging additionally needs Python 3.
+macOS host tests need developer tools for the C certificate probe.
+Installer/release-script tests and release packaging additionally need Python 3.9+.
 
 ```sh
 just                          # list recipes
@@ -134,15 +134,22 @@ release, refresh `Cargo.lock`, and keep version references in README consistent.
 ```sh
 just version
 just verify
-just release                         # native macOS/Linux target
-just release x86_64-apple-darwin       # matching Rust target must be installed
+just package                         # local native macOS/Linux archive
+just package x86_64-apple-darwin       # matching Rust target must be installed
+just release                         # explicitly request GitHub publication from pushed main
 ```
 
 `scripts/release.sh` supports ARM64 and x86_64 macOS/Linux (GNU or musl on Linux), builds with locked
 dependencies, and writes versioned archives/checksums in `dist/`. Archives include
-the executable, README, license, changelog, profiles, `examples/`, and `docs/`. Verify the
+the executable, README, license, changelog, `install.sh`, profiles, `examples/`, and `docs/`. Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
-Packaging is local: it does not sign, notarize, tag, or publish a release.
+`just package` is local: it does not sign, notarize, tag, or publish a release.
+`just release` requires clean, pushed main and dispatches `.github/workflows/release.yml`
+with an exact commit/version. Publication waits for all four native targets to
+pass tests, optimized enforcement, packaging, and archive smoke tests. Push/PR CI
+never publishes. Keep the shared verification workflow and installer target mapping
+aligned. Test installer/request scripts offline with `just test-release`; never
+publish a release merely to test automation.
 `target/` and `dist/` are ignored build outputs.
 
 CI runs portable checks, host enforcement, and packaging on Linux/macOS. Do not claim an unexecuted platform or CI run was verified.

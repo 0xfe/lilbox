@@ -32,7 +32,14 @@ test-sandbox:
     cargo test --locked --test "$suite" -- --ignored --test-threads=1
 
 # All portable checks.
-check: lint test
+check: lint test test-release
+
+# Offline installer and release automation regression tests.
+test-release:
+    bash -n scripts/release.sh
+    bash -n scripts/request-release.sh
+    sh -n install.sh
+    python3 scripts/test_release.py
 
 # Full verification including the current platform's enforcement.
 verify: check test-sandbox
@@ -50,9 +57,13 @@ install prefix=(env_var("HOME") + "/.local"):
 run *args:
     cargo run --locked -- "$@"
 
-# Versioned macOS/Linux archive + SHA-256 checksum in dist/; optional Rust target.
-release target="":
+# Local archive + SHA-256 checksum in dist/; does not publish.
+package target="":
     bash scripts/release.sh "$1"
+
+# Request GitHub publication of the clean, pushed main commit after all tests pass.
+release:
+    bash scripts/request-release.sh
 
 # Print the package version used for releases.
 version:

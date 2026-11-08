@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-CDPATH= cd -- "$(dirname "$0")/.."
+CDPATH='' cd -- "$(dirname "$0")/.."
 
 if [[ $(uname -s) != Darwin && $(uname -s) != Linux ]]; then
     echo 'Release packaging requires macOS or Linux.' >&2
@@ -22,7 +22,7 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/lilbox-release.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/$name"
 install -m 755 "target/$target/release/lilbox" "$stage/$name/lilbox"
-cp README.md LICENSE CHANGELOG.md "$stage/$name/"
+cp README.md LICENSE CHANGELOG.md install.sh "$stage/$name/"
 cp -R profiles "$stage/$name/profiles"
 cp -R docs "$stage/$name/docs"
 cp -R examples "$stage/$name/examples"

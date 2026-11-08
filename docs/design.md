@@ -397,15 +397,29 @@ macOS needs a host permitting `sandbox-exec`; Linux needs bubblewrap, user
 namespaces, seccomp, Python 3, and public CA certificates. Nested sandbox
 initialization may be denied. Ordinary `cargo test` does not prove enforcement.
 
-`Cargo.toml` supplies the version. `just release` uses
+`Cargo.toml` supplies the version. `just package` uses
 [scripts/release.sh](../scripts/release.sh) to build a locked release for the native
 macOS/Linux target or an explicitly selected supported target (macOS ARM64/x86_64,
 Linux ARM64/x86_64 GNU or musl). The target toolchain/linker must be installed;
 bubblewrap is a runtime system dependency and is not bundled. It writes a
 versioned tarball and SHA-256 sidecar in `dist/`. Archives include the executable,
-README, license, changelog, shipped profiles, the `examples/` gallery, and these docs. Python also writes the SHA-256 sidecar without a platform-specific checksum tool.
+README, license, changelog, `install.sh`, shipped profiles, the `examples/` gallery, and these docs. Python also writes the SHA-256 sidecar without a platform-specific checksum tool.
 File order, ownership, modes, timestamps, and gzip headers are normalized; reproducibility assumes identical
-compiled input bytes. Packaging does not sign, notarize, tag, or publish releases.
+compiled input bytes. Local packaging does not sign, notarize, tag, or publish releases.
+
+`just release` invokes `scripts/request-release.sh` to dispatch the GitHub release
+workflow for a clean, pushed main commit. A reusable verification workflow tests
+and packages all four native OS/architecture combinations; Linux publication uses
+static musl binaries. Ordinary push/PR CI calls that workflow without publication.
+The manual release path adds optimized enforcement and publishes only after all
+builds and archive checks pass. Its write-scoped final job creates the version tag
+at the tested commit and publishes archives/checksums plus `install.sh`.
+
+The POSIX installer detects OS/architecture, resolves latest or a pinned stable
+version, verifies the downloaded checksum and embedded version, then atomically
+replaces the executable under the requested prefix. It does not configure profiles
+or install sandbox backends. See [development.md](development.md) for release and
+installer requirements.
 
 CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 

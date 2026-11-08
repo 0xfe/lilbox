@@ -12,7 +12,7 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.2.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+Version **0.3.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
 through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
 refuse execution.
 
@@ -22,21 +22,38 @@ rules. Contributor instructions are in [AGENTS.md](AGENTS.md).
 
 ## Quickstart
 
-You need Rust/Cargo (1.85+), [Just](https://github.com/casey/just), and either macOS
-with `/usr/bin/sandbox-exec` or Linux with `/usr/bin/bwrap` (bubblewrap 0.6.3 or
-newer), user namespaces, and seccomp enabled. On Debian/Ubuntu, install it with
-`sudo apt-get install bubblewrap`. Install your agent separately. Linux host tests
-also need Python 3 and the system CA certificate package.
-
-From this source directory:
+Install the latest binary for macOS (Apple Silicon or Intel) or Linux (ARM64 or
+x86_64):
 
 ```sh
-just build
-just install                  # installs ~/.local/bin/lilbox
+curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
+```
 
-lilbox                        # help
-lilbox -v                     # embedded binary version (also --version)
+Choose a prefix or a specific release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s -- --prefix /usr/local --version 0.3.0
+```
+
+The prefix must be writable; the installer never invokes sudo. It verifies the
+archive's SHA-256 checksum and executable version before replacing `PREFIX/bin/lilbox`.
+It requires `curl`, `tar`, and `sha256sum` or `shasum`. Published Linux binaries are
+static musl builds for glibc and musl distributions. macOS binaries are unsigned
+and not notarized. To inspect the script first, download it to a file and run
+`sh install.sh --help`.
+
+Linux also needs `/usr/bin/bwrap` (bubblewrap 0.6.3+), permitted user namespaces,
+seccomp, and public CA certificates. On Debian/Ubuntu:
+`sudo apt-get install bubblewrap ca-certificates`. macOS requires
+`/usr/bin/sandbox-exec`. Install your coding agent separately.
+
+To build from source, install Rust/Cargo 1.85+ and
+[Just](https://github.com/casey/just), then run `just build` and `just install`.
+
+```sh
+lilbox                        # help, including the embedded version
+lilbox -v                     # version (also -V and --version)
 lilbox codex                  # launch Codex from PATH
 lilbox claude                 # launch Claude from PATH
 lilbox shell                  # interactive shell, user startup files disabled
@@ -84,7 +101,7 @@ The version from `Cargo.toml` is baked into the binary and appears in help and
 prints a compact summary to stderr:
 
 ```text
-  lilbox 0.2.0
+  lilbox 0.3.0
   ├ profile  default
   └ command  cargo test
 ```
