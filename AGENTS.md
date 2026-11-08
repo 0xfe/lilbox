@@ -128,15 +128,19 @@ contents change. Finish with `git diff --check` and review the diff.
 
 ## Releases
 
-`Cargo.toml` is the version source. Update its version and `CHANGELOG.md` for a
-release, refresh `Cargo.lock`, and keep version references in README consistent.
+`Cargo.toml` is the version source. `just bump [VERSION]` prepares it, the root
+`Cargo.lock` version, README references, and a dated `CHANGELOG.md` entry. Review
+generated notes and keep commit/push manual. Preparation requires a clean tree,
+Python 3.9+, authenticated GitHub CLI, and readable origin/GitHub release history.
 
 ```sh
 just version
+just bump                            # next patch; optional explicit version
 just verify
 just package                         # local native macOS/Linux archive
 just package x86_64-apple-darwin       # matching Rust target must be installed
 just release                         # explicitly request GitHub publication from pushed main
+just release 0.4.0                   # prepare if newer; rerun after manual commit/push
 ```
 
 `scripts/release.sh` supports ARM64 and x86_64 macOS/Linux (GNU or musl on Linux), builds with locked
@@ -144,12 +148,23 @@ dependencies, and writes versioned archives/checksums in `dist/`. Archives inclu
 the executable, README, license, changelog, `install.sh`, profiles, `examples/`, and `docs/`. Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
 `just package` is local: it does not sign, notarize, tag, or publish a release.
-`just release` requires clean, pushed main and dispatches `.github/workflows/release.yml`
-with an exact commit/version. Publication waits for all four native targets to
+`just release [VERSION]` prepares a newer optional version and stops; otherwise,
+it requires clean, pushed main and dispatches `.github/workflows/release.yml`
+with an exact commit/version. Neither command commits or pushes. Version checks
+in `scripts/version.py` reject malformed stable versions, downgrades, and versions
+at or below any existing stable local/remote tag or GitHub release (including
+drafts). The workflow validates again before building and publishing.
+Publication waits for all four native targets to
 pass tests, optimized enforcement, packaging, and archive smoke tests. Push/PR CI
 never publishes. Keep the shared verification workflow and installer target mapping
 aligned. Test installer/request scripts offline with `just test-release`; never
 publish a release merely to test automation.
+Installer tests build and install the native executable into temporary homes and
+prefixes, covering `init` without clobbering existing configs, terminal output,
+and failure recovery. `install.sh` initializes missing profiles after replacing
+the executable; initialization failure must report a partial install and exit
+nonzero. Keep CI's `scripts/test_release.py --binary PATH` pointing at its native
+target binary, and never use real user configs as installer fixtures.
 `target/` and `dist/` are ignored build outputs.
 
 CI runs portable checks, host enforcement, and packaging on Linux/macOS. Do not claim an unexecuted platform or CI run was verified.

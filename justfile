@@ -36,10 +36,11 @@ check: lint test test-release
 
 # Offline installer and release automation regression tests.
 test-release:
+    cargo build --locked
     bash -n scripts/release.sh
     bash -n scripts/request-release.sh
     sh -n install.sh
-    python3 scripts/test_release.py
+    python3 scripts/test_release.py --binary target/debug/lilbox
 
 # Full verification including the current platform's enforcement.
 verify: check test-sandbox
@@ -61,9 +62,13 @@ run *args:
 package target="":
     bash scripts/release.sh "$1"
 
-# Request GitHub publication of the clean, pushed main commit after all tests pass.
-release:
-    bash scripts/request-release.sh
+# Prepare the next patch version, or an explicit newer version; no commit or push.
+bump version="":
+    python3 scripts/version.py bump "$1"
+
+# Prepare an optional version, or publish the current clean, pushed main version.
+release version="":
+    bash scripts/request-release.sh "$1"
 
 # Print the package version used for releases.
 version:

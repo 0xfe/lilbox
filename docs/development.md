@@ -31,7 +31,7 @@ and [design.md](design.md) for module responsibilities.
 | `just check` | Formatting, Clippy with warnings denied, unit/CLI tests, and offline installer/release-script tests. |
 | `just test-sandbox` | Actual enforcement on the current host OS. |
 | `just verify` | Both sets of checks. |
-| `just test-release` | Offline installer and release-request regressions; Python 3.9+ required. |
+| `just test-release` | Build the native executable; offline installer and release-request regressions, including real config initialization; Python 3.9+ required. |
 
 Host tests use temporary homes and fake credentials. They cover filesystem denies,
 symlinks, ancestor renames, networking, descendants, descriptors, signals, and
@@ -71,22 +71,53 @@ policy. All enforcement tests still run as the unprivileged runner user.
 
 ## Publish a release
 
-1. Update `Cargo.toml`, refresh `Cargo.lock`, and update `CHANGELOG.md` and README.
-2. Run `just verify`, then commit and push the changes to `main`.
-3. Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`
-   using an account permitted to run this repository's Actions workflows.
-4. Run:
+Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`
+using an account permitted to read releases and run this repository's Actions
+workflows. Version preparation needs Python 3.9+, Git, a clean checkout, and access
+to `origin` and the GitHub API.
+
+Prepare the next patch version, or choose an explicit newer version:
 
 ```sh
+just bump                  # increment the patch component
+just bump 0.4.0            # alternatively, choose a version (v0.4.0 also works)
+```
+
+[`scripts/version.py`](../scripts/version.py) updates `Cargo.toml`, the root
+package in `Cargo.lock`, README version references, and `CHANGELOG.md`. An
+`Unreleased` heading becomes a dated release entry; otherwise, commit subjects
+since the latest available ancestor release tag seed a new entry. Review these
+generated notes before publishing. Dependency versions and old changelog entries
+remain unchanged.
+
+Then review, verify, commit, and push manually:
+
+```sh
+just verify
+git add Cargo.toml Cargo.lock README.md CHANGELOG.md
+git commit -m "Bump version for release"
+git push origin main
 just release
 ```
 
-[`scripts/request-release.sh`](../scripts/request-release.sh) requires a clean
-checkout on `main`, checks that HEAD equals the live `origin/main`, rejects an
-existing version tag, and dispatches the
-[release workflow](../.github/workflows/release.yml) with the exact commit and
-version. It does not commit or push your changes. The workflow must first be
-present on GitHub's default branch (`main`).
+`just release [VERSION]` accepts an optional version. If it is newer than the
+current version, it prepares the same four files and stops with instructions to
+verify, commit, and push manually. Run it again after those steps to publish.
+With no argument, or with the current version, it requires a clean checkout on
+`main` whose HEAD equals the live `origin/main`, then dispatches the
+[release workflow](../.github/workflows/release.yml) for that exact commit and
+version. Neither command commits or pushes. Local verification is manual;
+publication always waits for the workflow's full verification. The workflow must
+first be present on GitHub's default branch (`main`).
+
+Versions must be stable `X.Y.Z` numbers without leading zeros, prerelease suffixes,
+or build metadata; a leading `v` is accepted by the Just commands. Each component
+must fit Cargo's unsigned 64-bit limit. A bump must increase the current version.
+Both preparation and publication require a version greater than every existing
+stable local tag, remote tag, and GitHub release, including drafts. An unavailable
+remote history blocks the command. The workflow repeats these checks before
+building and immediately before publication, so using the Actions UI cannot
+bypass version validation.
 
 Only this explicit `workflow_dispatch` publishes: pushes, tags, and pull requests
 do not request releases. The Actions UI can also dispatch the same workflow with
@@ -172,9 +203,28 @@ Downloads use HTTPS. Before replacement, the installer checks the archive hash,
 extracts only the executable, and verifies its embedded version. A temporary file
 in the destination directory permits atomic replacement; failed downloads/checks
 leave an existing installation intact. Destination symlinks/directories are
-rejected. No sudo, profile initialization, shell startup edits, or system package
-installation is performed. Missing Linux bubblewrap is reported with installation
-instructions; kernel restrictions must still allow actual execution.
+rejected. After replacement, the installer invokes that exact executable's `init`
+command to create missing `default.toml` and `isolated.toml` profiles in
+`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Existing files and symlinks are preserved,
+including during upgrades. Initialization needs no sandbox backend. If it fails,
+the installer exits unsuccessfully, explains that the binary was installed, and
+prints the command to retry after fixing the config-directory problem. Some
+missing profiles may already have been created; retrying is safe.
+
+The completion screen includes a box logo, executable/config paths, a quoted PATH
+command when needed, quick-start commands, and a reminder of the default profile's
+broad access. Color follows stdout's terminal status (so `curl | sh` still uses
+color interactively), and is disabled by `NO_COLOR` (even empty) or `TERM=dumb`.
+No sudo, shell startup edits, or system package installation is performed. Missing
+Linux bubblewrap is reported with installation instructions; kernel restrictions
+must still allow actual execution.
+
+`just test-release` tests checksums, download failures, platform selection, upgrades,
+initialization failure reporting, terminal colors, and PATH quoting. It also
+installs the actual built executable into temporary prefixes and homes to verify
+fresh configs, missing-profile creation, custom XDG paths, and preservation of
+existing files/symlinks. CI runs these tests with each native target's binary.
+Downloads are fixture-backed; tests never contact GitHub or modify real profiles.
 
 Checksums detect damaged or mismatched downloads; they are distributed from the
 same GitHub release and are not an independent signing trust root. macOS binaries

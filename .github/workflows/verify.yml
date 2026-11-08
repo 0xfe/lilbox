@@ -82,7 +82,7 @@ jobs:
           bash -n scripts/release.sh
           bash -n scripts/request-release.sh
           sh -n install.sh
-          python3 scripts/test_release.py
+          python3 scripts/test_release.py --binary "target/$TARGET/debug/lilbox"
       - name: Real host enforcement
         run: cargo test --locked --target "$TARGET" --test "$SUITE" -- --ignored --test-threads=1
       - name: Optimized release enforcement

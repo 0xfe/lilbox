@@ -413,8 +413,18 @@ README, license, changelog, `install.sh`, shipped profiles, the `examples/` gall
 File order, ownership, modes, timestamps, and gzip headers are normalized; reproducibility assumes identical
 compiled input bytes. Local packaging does not sign, notarize, tag, or publish releases.
 
-`just release` invokes `scripts/request-release.sh` to dispatch the GitHub release
-workflow for a clean, pushed main commit. A reusable verification workflow tests
+`just bump [VERSION]` invokes [scripts/version.py](../scripts/version.py) to
+prepare the package/lockfile version, README references, and changelog together.
+It defaults to a patch increment and compares numeric stable versions against
+the current version, local/remote tags, and GitHub releases, including drafts.
+Unavailable remote history blocks preparation and publication. Commit and push
+remain manual.
+
+`just release [VERSION]` invokes `scripts/request-release.sh`, a wrapper around
+the same helper. A newer optional version prepares edits and stops; the current
+version dispatches the GitHub release workflow for a clean, pushed main commit.
+The workflow shares source/version validation with the helper and repeats the
+history checks immediately before creating a tag. A reusable verification workflow tests
 and packages all four native OS/architecture combinations; Linux publication uses
 static musl binaries. Ordinary push/PR CI calls that workflow without publication.
 The manual release path adds optimized enforcement and publishes only after all
@@ -423,9 +433,14 @@ at the tested commit and publishes archives/checksums plus `install.sh`.
 
 The POSIX installer detects OS/architecture, resolves latest or a pinned stable
 version, verifies the downloaded checksum and embedded version, then atomically
-replaces the executable under the requested prefix. It does not configure profiles
-or install sandbox backends. See [development.md](development.md) for release and
-installer requirements.
+replaces the executable under the requested prefix. It invokes the installed
+binary's `init` command, sharing the CLI's non-overwriting profile creation and
+HOME/XDG config resolution. Initialization errors report a partial installation
+and a retry command; successful installs show terminal-aware color, a box logo,
+config/executable locations, and usage/PATH guidance. It does not install sandbox
+backends. Installer regression tests use the built native executable and temporary
+homes to check config preservation. See [development.md](development.md) for release
+and installer requirements.
 
 CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 

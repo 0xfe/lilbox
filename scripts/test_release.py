@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """Offline installer and release-request tests; never contact GitHub or publish."""
+import argparse
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import pty
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = '0.3.0'
-SHA = 'a' * 40
+REAL_BINARY = None
 
 
 class ScriptsTest(unittest.TestCase):
@@ -32,7 +35,9 @@ class ScriptsTest(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.home), PATH=f'{self.bin}:/usr/bin:/bin',
                         TMPDIR=str(self.root), FIXTURES=str(self.assets), CALL_LOG=str(self.log),
                         FAKE_OS='Linux', FAKE_ARCH='x86_64', FAKE_VERSION=VERSION,
-                        FAKE_SHA=SHA, FAKE_BRANCH='main')
+                        INIT_LOG=str(self.root / 'init.log'), TERM='xterm-256color')
+        self.env.pop('XDG_CONFIG_HOME', None)
+        self.env.pop('NO_COLOR', None)
         # Independent of the shell's stdin: exercise the actual curl | sh pattern.
         self.tool('uname', '#!/bin/sh\ncase "$1" in -s) echo "$FAKE_OS" ;; -m) echo "$FAKE_ARCH" ;; esac\n')
         self.python_tool('curl', '''
@@ -61,8 +66,9 @@ else:
     def python_tool(self, name, source):
         self.tool(name, f'#!{sys.executable}\n' + source)
 
-    def archive(self, target='x86_64-unknown-linux-musl', binary_version=VERSION, symlink=False):
-        name = f'lilbox-{VERSION}-{target}'
+    def archive(self, target='x86_64-unknown-linux-musl', binary_version=VERSION, symlink=False,
+                content=None, release_version=VERSION):
+        name = f'lilbox-{release_version}-{target}'
         archive = self.assets / f'{name}.tar.gz'
         with tarfile.open(archive, 'w:gz') as bundle:
             member = tarfile.TarInfo(f'{name}/lilbox')
@@ -72,7 +78,16 @@ else:
                 member.linkname = '/bin/sh'
                 bundle.addfile(member)
             else:
-                content = f'#!/bin/sh\nprintf "lilbox {binary_version}\\n"\n'.encode()
+                if content is None:
+                    content = f'''#!/bin/sh
+case "$1" in
+    --version) printf 'lilbox {binary_version}\\n' ;;
+    init)
+        printf '%s\\n' "$0" >> "$INIT_LOG"
+        [ "${{FAIL_INIT:-0}}" = 0 ] || exit 1 ;;
+    *) exit 2 ;;
+esac
+'''.encode()
                 member.size = len(content)
                 bundle.addfile(member, io.BytesIO(content))
         Path(str(archive) + '.sha256').write_text(
@@ -86,6 +101,45 @@ else:
 
     def assert_failed(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def real_archive(self):
+        version = subprocess.check_output([REAL_BINARY, '--version'], text=True).strip().removeprefix('lilbox ')
+        self.archive(content=REAL_BINARY.read_bytes(), release_version=version)
+        return version
+
+    def terminal_install(self):
+        # stdin stays a pipe, exactly as in curl | sh; only stdout is a terminal.
+        master, slave = pty.openpty()
+        chunks = []
+
+        def read_output():
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break  # Linux PTYs report EIO after the final slave closes.
+                if not chunk:
+                    break
+                chunks.append(chunk)
+
+        try:
+            process = subprocess.Popen(['sh', '-s', '--', '--prefix', str(self.prefix), '--version', VERSION],
+                                       env=self.env, stdin=subprocess.PIPE, stdout=slave, stderr=subprocess.PIPE)
+        finally:
+            os.close(slave)
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        try:
+            _, errors = process.communicate((ROOT / 'install.sh').read_bytes(), timeout=15)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+            reader.join(timeout=5)
+            os.close(master)
+        self.assertFalse(reader.is_alive(), 'terminal output reader did not finish')
+        self.assertEqual(process.returncode, 0, errors)
+        return b''.join(chunks)
 
     def test_platforms_pinned_version_and_upgrade(self):
         for os_name, arch, target in [
@@ -105,6 +159,8 @@ else:
                 calls = self.log.read_text()
                 self.assertIn(f'{target}.tar.gz', calls)
                 self.assertNotIn('/releases/latest', calls)
+                self.assertEqual((self.root / 'init.log').read_text().splitlines()[-1], str(binary))
+                self.assertNotIn(b'\x1b', result.stdout)
 
     def test_latest_and_default_prefix(self):
         self.archive()
@@ -134,6 +190,7 @@ else:
                 self.assertEqual(destination.read_text(), 'keep existing binary')
                 self.assertEqual(list(self.root.glob('lilbox-install.*')), [])
                 self.assertEqual(list(destination.parent.glob('.lilbox.*')), [])
+                self.assertFalse((self.root / 'init.log').exists())
 
     def test_bad_inputs_fail_before_download(self):
         for args in [('--prefix', 'relative'), ('--version', '../../escape'), ('--unknown',), ('--version',)]:
@@ -162,58 +219,284 @@ else:
         self.assert_failed(self.install('--version', VERSION))
         self.assertEqual(original.read_text(), 'unchanged')
 
-    def release_tools(self):
-        self.python_tool('git', '''
-import os, sys
-args = sys.argv[1:]
-if args[0] == 'status': print(os.environ.get('FAKE_DIRTY', ''), end='')
-elif args[0] == 'symbolic-ref': print(os.environ['FAKE_BRANCH'])
-elif args[0] == 'rev-parse': print(os.environ['FAKE_SHA'])
-elif args[0] == 'ls-remote':
-    if 'refs/heads/main' in args:
-        print(os.environ.get('FAKE_REMOTE', os.environ['FAKE_SHA']) + '\\trefs/heads/main')
-    elif os.environ.get('FAKE_TAG'):
-        print(os.environ['FAKE_SHA'] + '\\trefs/tags/v0.3.0')
-elif args[0] == 'remote': print('git@github.com:0xfe/lilbox.git')
-else: sys.exit(1)
-''')
-        self.tool('cargo', '#!/bin/sh\necho "path+file:///repo/lilbox#${FAKE_VERSION}"\n')
-        self.python_tool('gh', '''
+    def test_real_init_fresh_install_and_upgrade_preserve_custom_profiles(self):
+        version = self.real_archive()
+        # A pre-existing lilbox in PATH must never handle initialization.
+        self.tool('lilbox', '#!/bin/sh\nexit 96\n')
+        result = self.install('--version', version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.home / '.config/lilbox'
+        for name in ('default', 'isolated'):
+            self.assertEqual((config / f'{name}.toml').read_bytes(), (ROOT / 'profiles' / f'{name}.toml').read_bytes())
+        custom = config / 'default.toml'
+        custom.write_text('# Handwritten profile; must survive upgrades.\n')
+        original = custom.stat()
+        extra = config / 'work.toml'
+        extra.write_text('# Custom named profile.\n')
+        (config / 'isolated.toml').unlink()
+        result = self.install('--version', version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(custom.read_text(), '# Handwritten profile; must survive upgrades.\n')
+        self.assertEqual(custom.stat().st_mtime_ns, original.st_mtime_ns)
+        self.assertEqual(custom.stat().st_ino, original.st_ino)
+        self.assertEqual(extra.read_text(), '# Custom named profile.\n')
+        self.assertEqual((config / 'isolated.toml').read_bytes(), (ROOT / 'profiles/isolated.toml').read_bytes())
+        output = result.stdout.decode()
+        for expected in (str(config), str(self.prefix / 'bin/lilbox'), 'existing files preserved',
+                         'lilbox check', 'lilbox shell', 'lilbox codex', 'export PATH=', '+-------+'):
+            self.assertIn(expected, output)
+
+    def test_real_init_xdg_directory_and_existing_symlinks_are_preserved(self):
+        version = self.real_archive()
+        xdg = self.root / 'custom config'
+        self.env['XDG_CONFIG_HOME'] = str(xdg)
+        config = xdg / 'lilbox'
+        config.mkdir(parents=True)
+        original = self.root / 'external.toml'
+        original.write_text('# Existing symlink target.\n')
+        (config / 'default.toml').symlink_to(original)
+        missing = self.root / 'missing.toml'
+        (config / 'isolated.toml').symlink_to(missing)
+        result = self.install('--version', version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((config / 'default.toml').is_symlink())
+        self.assertTrue((config / 'isolated.toml').is_symlink())
+        self.assertEqual(original.read_text(), '# Existing symlink target.\n')
+        self.assertFalse(missing.exists())
+        self.assertFalse((self.home / '.config').exists())
+        self.assertIn(str(config).encode(), result.stdout)
+
+    def test_real_init_failure_reports_partial_install_and_recovery(self):
+        version = self.real_archive()
+        blocked = self.root / 'not-a-directory'
+        blocked.write_text('preserve this file')
+        self.env['XDG_CONFIG_HOME'] = str(blocked)
+        result = self.install('--version', version)
+        self.assert_failed(result)
+        self.assertEqual(blocked.read_text(), 'preserve this file')
+        self.assertTrue((self.prefix / 'bin/lilbox').is_file())
+        self.assertIn(b'profile initialization failed', result.stderr)
+        self.assertIn(b'then retry:', result.stderr)
+        self.assertNotIn(b'Installed and ready', result.stdout)
+        self.assertEqual(list((self.prefix / 'bin').glob('.lilbox.*')), [])
+
+    def test_terminal_colors_and_opt_out(self):
+        self.archive()
+        self.assertIn(b'\x1b[1;36m', self.terminal_install())
+        for value in ('', '1'):
+            self.env['NO_COLOR'] = value
+            self.assertNotIn(b'\x1b', self.terminal_install())
+        self.env.pop('NO_COLOR')
+        self.env['TERM'] = 'dumb'
+        self.assertNotIn(b'\x1b', self.terminal_install())
+
+    def test_path_guidance_is_shell_quoted_and_omitted_when_already_present(self):
+        self.archive()
+        self.prefix = self.root / "prefix ' with $spaces"
+        result = self.install('--version', VERSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = next(line.strip() for line in result.stdout.decode().splitlines() if 'export PATH=' in line)
+        actual = subprocess.check_output(['sh', '-c', command + '\nprintf "%s" "$PATH"'], env=self.env, text=True)
+        self.assertEqual(actual, str(self.prefix / 'bin') + ':' + self.env['PATH'])
+        self.env['PATH'] = actual
+        result = self.install('--version', VERSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(b'export PATH=', result.stdout)
+
+
+
+class VersionFlowTest(unittest.TestCase):
+    """Use real temporary Git repositories; only GitHub API/dispatch is stubbed."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='lilbox-version-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        self.origin = self.root / 'origin.git'
+        self.bin = self.root / 'tools'
+        self.bin.mkdir()
+        (self.bin / 'python3').symlink_to(sys.executable)
+        self.log = self.root / 'dispatch.jsonl'
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        self.env.update(HOME=str(self.root), GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
+                        PATH=f'{self.bin}:/usr/bin:/bin', DISPATCH_LOG=str(self.log))
+        self.git('init', '-b', 'main')
+        self.git('config', 'user.name', 'Release Test')
+        self.git('config', 'user.email', 'release@example.invalid')
+        subprocess.run(['git', 'init', '--bare', str(self.origin)], env=self.env, capture_output=True, check=True)
+        self.git('remote', 'add', 'origin', str(self.origin))
+        (self.repo / 'scripts').mkdir()
+        for name in ('version.py', 'request-release.sh'):
+            (self.repo / 'scripts' / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
+        self.metadata('0.3.0')
+        self.commit('Initial version metadata')
+        self.git('tag', 'v0.2.0')
+        (self.repo / 'change.txt').write_text('a real change\n')
+        self.commit('Improve the sandbox launcher')
+        self.git('push', '-u', 'origin', 'main', '--tags')
+        gh = self.bin / 'gh'
+        gh.write_text(f'#!{sys.executable}\n' + '''
 import json, os, sys
 args = sys.argv[1:]
-if args[:2] == ['repo', 'view']: print('0xfe/lilbox')
+if args[:2] == ['repo', 'view']:
+    print('0xfe/lilbox')
+elif args[0] == 'api':
+    if os.environ.get('HISTORY_FAIL'):
+        sys.exit('GitHub unavailable')
+    print(os.environ.get('RELEASE_TAGS', ''))
 elif args[:2] == ['workflow', 'run']:
-    with open(os.environ['CALL_LOG'], 'a') as log: log.write(json.dumps(args) + '\\n')
-else: sys.exit(1)
+    with open(os.environ['DISPATCH_LOG'], 'a') as log:
+        log.write(json.dumps(args) + '\\n')
+else:
+    sys.exit('unexpected gh call: ' + repr(args))
 ''')
+        gh.chmod(0o755)
 
-    def request_release(self):
-        return subprocess.run(['bash', str(ROOT / 'scripts/request-release.sh')],
-                              env=self.env, capture_output=True, timeout=15)
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.repo, env=self.env, stderr=subprocess.PIPE).decode().strip()
 
-    def test_release_request_pins_commit_and_version(self):
-        self.release_tools()
-        result = self.request_release()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(self.log.read_text()),
-                         ['workflow', 'run', 'release.yml', '--repo', '0xfe/lilbox', '--ref', 'main',
-                          '-f', f'commit={SHA}', '-f', f'version={VERSION}'])
+    def commit(self, message):
+        self.git('add', '.')
+        self.git('commit', '-m', message)
 
-    def test_release_request_rejects_unready_sources(self):
-        self.release_tools()
-        for key, value in [('FAKE_DIRTY', ' M README.md'), ('FAKE_BRANCH', 'feature'),
-                           ('FAKE_REMOTE', 'b' * 40), ('FAKE_TAG', 'exists'),
-                           ('FAKE_VERSION', '0.3.0-rc.1')]:
-            with self.subTest(key=key):
-                previous = self.env.get(key)
-                self.env[key] = value
-                self.assert_failed(self.request_release())
-                if previous is None:
-                    self.env.pop(key)
-                else:
-                    self.env[key] = previous
+    def metadata(self, version):
+        (self.repo / 'Cargo.toml').write_text(f'[package]\nname = "lilbox"\nversion = "{version}"\n\n[dependencies]\nanyhow = "1"\n')
+        (self.repo / 'Cargo.lock').write_text(f'version = 4\n\n[[package]]\nname = "dependency"\nversion = "0.3.0"\n\n[[package]]\nname = "lilbox"\nversion = "{version}"\ndependencies = ["dependency"]\n')
+        (self.repo / 'README.md').write_text(f'Version **{version}** supports macOS and Linux.\ninstall.sh --version {version}\n\n  lilbox {version}\n')
+        (self.repo / 'CHANGELOG.md').write_text(f'# Changelog\n\n## {version} — 2026-11-08\n\n- Previous notes.\n\n## 0.2.0 — 2026-10-01\n\n- Historical notes.\n')
+
+    def invoke(self, action, version=None):
+        command = [sys.executable, str(self.repo / 'scripts/version.py'), action]
+        if action == 'release':
+            command = ['bash', str(self.repo / 'scripts/request-release.sh')]
+        if version is not None:
+            command.append(version)
+        return subprocess.run(command, cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=15)
+
+    def snapshot(self):
+        return {name: (self.repo / name).read_bytes() for name in ('Cargo.toml', 'Cargo.lock', 'README.md', 'CHANGELOG.md')}
+
+    def assert_rejected(self, result, before):
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.log.exists())
+
+    def test_default_patch_bump_updates_only_version_files_without_commit_or_push(self):
+        head = self.git('rev-parse', 'HEAD')
+        result = self.invoke('bump')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ('Cargo.toml', 'Cargo.lock', 'README.md', 'CHANGELOG.md'):
+            self.assertIn('0.3.1', (self.repo / name).read_text())
+        self.assertIn('name = "dependency"\nversion = "0.3.0"', (self.repo / 'Cargo.lock').read_text())
+        self.assertIn('- Improve the sandbox launcher', (self.repo / 'CHANGELOG.md').read_text())
+        self.assertIn('## 0.3.0 — 2026-11-08\n\n- Previous notes.', (self.repo / 'CHANGELOG.md').read_text())
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('ls-remote', 'origin', 'refs/heads/main').split()[0], head)
+        self.assertEqual(set(self.git('diff', '--name-only').splitlines()), set(self.snapshot()))
+        self.assertFalse(self.log.exists())
+
+    def test_explicit_version_normalizes_v_and_preserves_unreleased_notes(self):
+        path = self.repo / 'CHANGELOG.md'
+        path.write_text(path.read_text().replace('# Changelog\n', '# Changelog\n\n## Unreleased\n\n- Handwritten change.\n', 1))
+        self.commit('Add unreleased notes')
+        result = self.invoke('bump', 'v0.4.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        notes = path.read_text()
+        self.assertNotIn('## Unreleased', notes)
+        self.assertIn('\n\n- Handwritten change.\n', notes)
+        self.assertIn('## 0.4.0 — ', notes)
+
+    def test_numeric_ordering_and_minor_rollover(self):
+        self.metadata('0.9.9')
+        self.commit('Prepare current version')
+        result = self.invoke('bump', '0.10.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invalid_equal_older_and_overflow_versions_leave_files_untouched(self):
+        before = self.snapshot()
+        for version in ('0.3.0', '0.2.9', '01.2.3', '1.02.3', '1.2.03', '1.2', '1.2.3.4',
+                        '1.2.3-rc.1', '1.2.3+build', ' 1.2.3', '1.2.3\n', 'v', 'vv1.2.3',
+                        '1.2.$(touch BAD)', '18446744073709551616.0.0'):
+            with self.subTest(version=version):
+                self.assert_rejected(self.invoke('bump', version), before)
+        self.assertFalse((self.repo / 'BAD').exists())
+
+    def test_local_remote_annotated_and_github_release_reservations(self):
+        before = self.snapshot()
+        self.git('tag', '0.3.1')
+        self.assert_rejected(self.invoke('bump'), before)
+        self.git('tag', '-d', '0.3.1')
+        self.git('tag', '-a', 'v0.3.1', '-m', 'Reserved version')
+        self.git('push', 'origin', 'v0.3.1')
+        self.git('tag', '-d', 'v0.3.1')
+        self.assert_rejected(self.invoke('bump'), before)
+        self.env['RELEASE_TAGS'] = 'v0.5.0\nv0.4.0'
+        self.assert_rejected(self.invoke('bump', '0.4.1'), before)
+        self.assert_rejected(self.invoke('bump', '0.5.0'), before)
+
+    def test_remote_failures_and_dirty_tree_fail_before_writes(self):
+        before = self.snapshot()
+        self.env['HISTORY_FAIL'] = '1'
+        self.assert_rejected(self.invoke('bump'), before)
+        self.env.pop('HISTORY_FAIL')
+        self.git('remote', 'set-url', 'origin', str(self.root / 'missing.git'))
+        self.assert_rejected(self.invoke('bump'), before)
+        self.git('remote', 'set-url', 'origin', str(self.origin))
+        (self.repo / 'untracked').write_text('user work')
+        self.assert_rejected(self.invoke('bump'), before)
+        self.assertEqual((self.repo / 'untracked').read_text(), 'user work')
+
+    def test_inconsistent_metadata_fails_without_partial_bump(self):
+        readme = self.repo / 'README.md'
+        readme.write_text(readme.read_text().replace('Version **0.3.0**', 'Version **0.1.0**'))
+        self.commit('Inconsistent docs fixture')
+        self.assert_rejected(self.invoke('bump'), self.snapshot())
+
+    def test_release_current_dispatches_exact_commit_without_mutation(self):
+        before = self.snapshot()
+        result = self.invoke('release')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        args = json.loads(self.log.read_text())
+        self.assertEqual(args, ['workflow', 'run', 'release.yml', '--repo', '0xfe/lilbox', '--ref', 'main',
+                                '-f', 'commit=' + self.git('rev-parse', 'HEAD'), '-f', 'version=0.3.0'])
+
+    def test_release_new_version_stops_for_manual_commit_and_push(self):
+        result = self.invoke('release', 'v0.4.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('commit and push', result.stdout)
+        self.assertFalse(self.log.exists())
+        self.assert_rejected(self.invoke('release', '0.4.0'), self.snapshot())
+        self.commit('Prepare v0.4.0')
+        self.assert_rejected(self.invoke('release', '0.4.0'), self.snapshot())
+        self.git('push', 'origin', 'main')
+        result = self.invoke('release', '0.4.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('version=0.4.0', self.log.read_text())
+
+    def test_release_rejects_feature_branch_older_versions_and_existing_releases(self):
+        before = self.snapshot()
+        self.assert_rejected(self.invoke('release', '0.2.9'), before)
+        self.git('switch', '-c', 'feature')
+        self.assert_rejected(self.invoke('release'), before)
+        self.git('switch', 'main')
+        self.env['RELEASE_TAGS'] = 'v0.3.0'
+        self.assert_rejected(self.invoke('release'), before)
+
+    def test_workflow_check_rejects_noncanonical_mismatched_or_newly_reserved_versions(self):
+        before = self.snapshot()
+        result = self.invoke('check', '0.3.0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for version in ('v0.3.0', '0.4.0', '00.3.0'):
+            self.assert_rejected(self.invoke('check', version), before)
+        self.env['RELEASE_TAGS'] = 'v0.3.1'
+        self.assert_rejected(self.invoke('check', '0.3.0'), before)
 
 
 if __name__ == '__main__':
-    unittest.main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', type=Path, required=True, help='Built native lilbox executable for installer integration tests')
+    options, test_args = parser.parse_known_args()
+    REAL_BINARY = options.binary.resolve(strict=True)
+    unittest.main(argv=[sys.argv[0], *test_args])

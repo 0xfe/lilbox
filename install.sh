@@ -1,6 +1,12 @@
 #!/bin/sh
 # Usage: curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh
 # Keep execution inside a function so a truncated download cannot partially install.
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
 main() {
     set -eu
     repository=https://github.com/0xfe/lilbox
@@ -18,6 +24,7 @@ main() {
             -h|--help)
                 echo 'Usage: sh install.sh [--prefix /absolute/path] [--version X.Y.Z]'
                 echo 'Installs PREFIX/bin/lilbox (default: ~/.local/bin), using the latest stable release.'
+                echo 'Creates missing starter profiles with lilbox init; existing configs are preserved.'
                 return ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
@@ -97,14 +104,52 @@ main() {
     [ "$("$pending" --version)" = "lilbox $version" ] || { echo 'Release executable version mismatch.' >&2; exit 1; }
     mv -f "$pending" "$destination"
     pending=
-    echo "Installed lilbox $version to $destination"
+    # Invoke this exact executable, even if another lilbox is already on PATH.
+    if ! "$destination" init; then
+        printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
+        printf 'Fix the error above, then retry: ' >&2
+        shell_quote "$destination" >&2
+        printf ' init\n' >&2
+        exit 1
+    fi
+    config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
+    accent='' green='' bold='' reset=''
+    if [ -t 1 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-}" != dumb ]; then
+        accent=$(printf '\033[1;36m')
+        green=$(printf '\033[1;32m')
+        bold=$(printf '\033[1m')
+        reset=$(printf '\033[0m')
+    fi
+    printf '\n%s' "$accent"
+    printf '       +-------+\n'
+    printf '      /       /|\n'
+    printf '     +-------+ |   %slilbox %s%s\n' "$bold" "$version" "$accent"
+    printf '     |       | +   %sInstalled and ready%s\n' "$green" "$accent"
+    printf '     |       |/\n'
+    printf '     +-------+%s\n\n' "$reset"
+    printf '  Executable  %s\n' "$destination"
+    printf '  Configs     %s\n' "$config_directory"
+    printf '              default.toml and isolated.toml; existing files preserved.\n\n'
     case ":${PATH:-}:" in
         *":$prefix/bin:"*) ;;
-        *) printf 'Add %s/bin to your PATH.\n' "$prefix" ;;
+        *) printf '%sAdd to PATH%s (run now; add to your shell startup file to keep it):\n  export PATH=' "$bold" "$reset"
+           shell_quote "$prefix/bin"
+           # Expand PATH when the user runs the printed command, not during installation.
+           # shellcheck disable=SC2016
+           printf ':"$PATH"\n\n' ;;
     esac
+    printf '%sGet started%s\n' "$bold" "$reset"
+    printf '  lilbox --help             Explore commands\n'
+    printf '  lilbox check              Inspect profiles and permissions\n'
+    printf '  lilbox shell              Open a sandboxed shell\n'
+    printf '  lilbox codex              Run Codex (install your agent separately)\n\n'
+    printf 'The default profile allows network access and broad filesystem access,\n'
+    printf 'with specific private-path denies. Edit profiles to customize permissions.\n'
     if [ "$os" = Linux ] && [ ! -x /usr/bin/bwrap ]; then
+        printf '\n%sLinux prerequisite%s\n' "$bold" "$reset"
         echo 'Linux execution requires /usr/bin/bwrap (bubblewrap 0.6.3+), user namespaces, and seccomp.'
         echo 'On Debian/Ubuntu: sudo apt-get install bubblewrap ca-certificates'
     fi
+    printf '\nDocs: https://github.com/0xfe/lilbox#readme\n'
 }
 main "$@"

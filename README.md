@@ -38,6 +38,10 @@ curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s
 
 The prefix must be writable; the installer never invokes sudo. It verifies the
 archive's SHA-256 checksum and executable version before replacing `PREFIX/bin/lilbox`.
+It then runs `lilbox init` to create missing starter profiles in
+`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`, preserving existing configs. The
+completion message shows the executable/config paths, PATH setup, and quick-start
+commands. Terminal output uses color unless `NO_COLOR` is set or `TERM=dumb`.
 It requires `curl`, `tar`, and `sha256sum` or `shasum`. Published Linux binaries are
 static musl builds for glibc and musl distributions. macOS binaries are unsigned
 and not notarized. To inspect the script first, download it to a file and run
@@ -68,7 +72,7 @@ current directory remain writable, subject to the Linux restrictions below.
 To configure profiles:
 
 ```sh
-lilbox init                   # creates examples; never overwrites existing files
+lilbox init                   # installer does this too; never overwrites existing files
 lilbox -p isolated exec /bin/sh -c 'echo hello; ls'
 lilbox -p isolated shell
 lilbox --print-policy         # inspect the exact native policy
@@ -196,6 +200,6 @@ See [check diagnostics](docs/design.md#static-configuration-analysis).
 | [Security and authentication](docs/security.md) | Credential protection, login access, networking, and sandbox limits. |
 | [Profile reference](docs/profiles.md) | Effective permissions, Linux restrictions, environment rules, and inheritance. |
 | [Design](docs/design.md) | Architecture, backends, path resolution, and process lifecycle. |
-| [Development and releases](docs/development.md) | Build commands, tests, packaging, and release verification. |
+| [Development and releases](docs/development.md) | Build commands, tests, `just bump [VERSION]`, `just release [VERSION]`, and packaging. |
 | [Example profiles](examples/README.md) | Standalone, inherited, offline, and online configurations. |
 | [Contributor instructions](AGENTS.md) | Repository conventions and security constraints. |

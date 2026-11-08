@@ -28,24 +28,13 @@ jobs:
           persist-credentials: false
       - name: Validate requested source and version
         env:
+          GH_TOKEN: ${{ github.token }}
           REQUESTED_COMMIT: ${{ inputs.commit }}
           REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          python3 - <<'PY'
-          import os, pathlib, re, tomllib
-          version = os.environ['REQUESTED_VERSION']
-          assert os.environ['GITHUB_REF'] == 'refs/heads/main', 'Release must run from main'
-          assert os.environ['REQUESTED_COMMIT'] == os.environ['GITHUB_SHA'], 'main moved; request again'
-          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version), 'Expected stable X.Y.Z'
-          package = tomllib.loads(pathlib.Path('Cargo.toml').read_text())['package']
-          assert package['version'] == version, 'Cargo.toml version mismatch'
-          assert f'## {version} — ' in pathlib.Path('CHANGELOG.md').read_text(), 'Missing changelog entry'
-          PY
-          existing_tag=$(git ls-remote origin "refs/tags/v$REQUESTED_VERSION")
-          test -z "$existing_tag" || {
-            echo 'Release tag already exists; bump the version first.' >&2
-            exit 1
-          }
+          test "$GITHUB_REF" = refs/heads/main || { echo 'Release must run from main.' >&2; exit 1; }
+          test "$REQUESTED_COMMIT" = "$GITHUB_SHA" || { echo 'main moved; request again.' >&2; exit 1; }
+          python3 scripts/version.py check "$REQUESTED_VERSION"
   build:
     needs: validate
     uses: ./.github/workflows/verify.yml
@@ -89,6 +78,8 @@ jobs:
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.commit }}
         run: |
+          # Recheck history after the builds in case a version was reserved meanwhile.
+          python3 scripts/version.py check "$VERSION"
           # Create the exact tested tag atomically; an existing ref is an error.
           gh api "repos/$GH_REPO/git/refs" --method POST \
             -f "ref=refs/tags/v$VERSION" -f "sha=$COMMIT" --silent
