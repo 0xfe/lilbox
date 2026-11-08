@@ -23,33 +23,19 @@ rules. Contributor instructions are in [AGENTS.md](AGENTS.md).
 ## Quickstart
 
 Install the latest binary for macOS (Apple Silicon or Intel) or Linux (ARM64 or
-x86_64):
+x86_64) to `~/.local/bin`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Choose a prefix or a specific release:
+Choose an alternate installation prefix or a specific release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s -- --prefix /usr/local --version 0.3.1
 ```
 
-The prefix must be writable; the installer never invokes sudo. It verifies the
-archive's SHA-256 checksum and executable version before replacing `PREFIX/bin/lilbox`.
-It then runs `lilbox init` to create missing starter profiles in
-`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`, preserving existing configs. The
-completion message shows the executable/config paths, PATH setup, and quick-start
-commands. Terminal output uses color unless `NO_COLOR` is set or `TERM=dumb`.
-It requires `curl`, `tar`, and `sha256sum` or `shasum`. Published Linux binaries are
-static musl builds for glibc and musl distributions. macOS binaries are unsigned
-and not notarized. To inspect the script first, download it to a file and run
-`sh install.sh --help`.
-
-Linux also needs `/usr/bin/bwrap` (bubblewrap 0.6.3+), permitted user namespaces,
-seccomp, and public CA certificates. On Debian/Ubuntu:
-`sudo apt-get install bubblewrap ca-certificates`. macOS requires
 `/usr/bin/sandbox-exec`. Install your coding agent separately.
 
 To build from source, install Rust/Cargo 1.85+ and
@@ -109,12 +95,6 @@ prints a compact summary to stderr:
   ├ profile  default
   └ command  cargo test
 ```
-
-The summary uses color on terminals unless `NO_COLOR` is set or `TERM=dumb`.
-It shows the selected profile and command arguments, quoting complex arguments
-and escaping control characters for display. Shell launches include their startup
-flags. Standard output remains the command's output; help, version, `init`,
-`check`, and `--print-policy` do not print a launch summary.
 
 Put lilbox options **before** the command; subsequent arguments go to the program.
 Use an explicit shell for pipelines:
