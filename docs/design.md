@@ -7,7 +7,9 @@ settings, or act as a network proxy. Bubblewrap constructs a mount namespace.
 
 This document describes the current implementation. [profiles.md](profiles.md)
 is the detailed permissions reference; [README.md](../README.md) provides the
-quickstart. [plan.md](../plan.md) records implementation history and verification.
+quickstart. See [security.md](security.md) for user-facing security boundaries and
+[development.md](development.md) for testing and releases.
+[plan.md](../plan.md) records implementation history and verification.
 Source links in these documents refer to the repository checkout.
 
 ## Goals and boundaries

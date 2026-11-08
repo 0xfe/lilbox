@@ -5,10 +5,10 @@ This reference describes the shipped [default](../profiles/default.toml) and
 It must be updated whenever configuration, filesystem rules, environment filters,
 network/trust handling, runtime capabilities, or launch behavior change.
 
-For architecture and implementation details, see [design.md](design.md). Rules
-below describe what lilbox permits; normal filesystem permissions and host
-authorization still apply. Seatbelt-specific operations below apply to macOS;
-Linux differences are detailed in the next section. Installed profiles can differ from these examples.
+See [security and authentication](security.md) for boundaries and login setup,
+and [design.md](design.md) for implementation details. Normal filesystem
+permissions and host authorization still apply. Installed profiles can differ
+from these examples; Seatbelt-specific operations below apply only to macOS.
 
 ## Selection and inspection
 
@@ -35,66 +35,106 @@ the kernel to enforce the policy.
 
 ## Linux bubblewrap permissions
 
-Linux x86_64/aarch64 uses `/usr/bin/bwrap` (0.6.3 or newer), with required user,
-PID, IPC, and UTS namespaces and seccomp. Missing support is a launch failure.
-Open mode exposes the host root except the restrictions below. Closed mode uses
-only explicit grants plus runtime mounts, and requires `runtime.basic = true`;
-profiles requesting closed execution without that capability are rejected.
+Linux x86_64/aarch64 requires `/usr/bin/bwrap` 0.6.3+, user/PID/IPC/UTS
+namespaces, and seccomp. Missing support is a launch failure.
 
-Filesystem denies apply after grants. Existing denied directories/files become
-empty, mode-000, read-only mounts; original bytes are neither read nor changed.
-Their mountpoint names/metadata may still be visible. Ancestors of denied paths
-are pinned as mountpoints wherever the host directory is exposed, preventing
-renames. Lexical symlinks resolve to protected canonical targets; inherited profile
-files receive the same protection. As with macOS, pre-existing hard links or
-cooperating unsandboxed filesystem changes are outside the boundary.
+| Mode | Filesystem baseline | Runtime requirement |
+| --- | --- | --- |
+| Open | Host root, subject to denies and the restrictions below. | Basic runtime is available. |
+| Closed | Explicit grants and private runtime mounts only. | `runtime.basic = true`; otherwise the profile is rejected. |
 
-**Missing denies restrict their nearest existing writable parent.** That parent
-is mounted read-only, with existing allowed children rebound to retain their
-original read/write access. Creating, deleting, renaming, or atomically replacing
-its direct children is blocked, including all new sibling names. Existing allowed
-files remain writable in place; existing allowed subdirectories can accept new
-files. Thus an absent workspace `.env` restricts changes to directory entries at
-the workspace root. `check` emits a warning for each affected parent (`--strict`
-fails on these warnings). No placeholder files or directories are created on the
-host. This is deliberately more restrictive than Seatbelt's future-path denies.
-For a different policy, disable built-in credential protection in a custom profile
-and supply a reviewed deny list; configuration protection cannot be disabled.
+### Linux filesystem grants
 
-Closed read grants are read-only mounts; writes include reads and execution.
-Write grants win over overlapping read grants. Absent read grants expose nothing;
-absent standalone write roots must be created outside the sandbox before use.
-An existing writable ancestor permits future children, subject to denies. Scratch
-is created and validated automatically before mount planning. Synthetic ancestors
-and the closed filesystem root are read-only. Grants do not rewrite user TOML.
+| Rule | Effect |
+| --- | --- |
+| Closed-mode read grant | Read-only mount with executable access. |
+| Closed-mode write grant | Read/write/execute access; wins over overlapping read grants. |
+| Existing denied directory or file | Empty, mode-000, read-only mount applied after grants. Original content stays untouched; mountpoint names/metadata may remain visible. |
+| Ancestor of a denied path | Pinned as a mountpoint wherever the host directory is exposed, preventing renames. |
+| Symlink or inherited profile | Canonical targets remain protected. |
+| Missing read grant | Exposes nothing. |
+| Missing standalone write root | Must be created outside the sandbox before use. An existing writable ancestor permits future children, subject to denies. |
+| Scratch storage | Created and validated before mounting. |
+| Synthetic ancestors and closed root | Read-only. |
 
-Both modes replace host `/proc` with a view of sandbox processes, use bubblewrap's
-minimal `/dev` (standard devices, fd links, and private PTYs), and hide `/sys` behind
-an empty read-only mount. Explicit grants/denies inside these reserved trees are
-rejected. Capabilities are dropped. The seccomp filter rejects other syscall ABIs,
-x32, namespace creation/mount changes, ptrace/process-memory access, open-by-handle,
-kernel keyring access, BPF, io_uring (including its alternate socket operations),
-and terminal injection ioctls. Ordinary process/thread
-creation is allowed; `clone3` returns ENOSYS to permit runtime fallback to `clone`.
-This is not a comprehensive syscall allowlist or a VM. Nested sandbox tools can
-fail under these restrictions.
+Upgrading lilbox does not rewrite user profiles. As on macOS, pre-existing hard
+links and cooperating unsandboxed filesystem changes are outside the boundary.
 
-Online mode shares host networking, including accessible host Unix sockets.
-Offline mode uses a private network namespace and blocks creation of TCP, UDP,
-Unix, and other sockets, including socketpairs. Route-netlink inside that private
-namespace remains available because bubblewrap configures loopback after applying
-the filter. Inherited standard I/O is preserved and must not carry an unwanted
-network capability. System CA files under the starter `/etc` and `/usr` grants
-remain readable; custom CA files need their own grants. Public certificate
-verification is never disabled. Desktop services reachable through online Unix
-sockets can still mediate access to secrets; file denial alone does not prevent it.
+### Missing denied paths
 
-Linux inherits the shared environment/umask/core-limit rules. Only backend-owned
-anonymous filter/mask descriptors survive lilbox's descriptor cleanup; bubblewrap
-consumes them before target execution. Bubblewrap supervises the PID namespace and
-preserves target exit codes; signal deaths return `128 + signal`. Linux `shell` falls back to `/bin/sh` when SHELL is
-unset. Other platforms' detailed runtime bundles below should not be read as a
-claim that Linux implements macOS Mach services or sysctl policy.
+**A missing deny makes its nearest existing writable parent read-only.** Existing
+allowed children are rebound with their original access, but changing the
+parent's directory entries is blocked.
+
+| Operation in that parent | Result |
+| --- | --- |
+| Create a new child, including the denied name | Blocked |
+| Delete or rename a direct child | Blocked |
+| Atomically replace a direct child | Blocked |
+| Edit an existing allowed file in place | Allowed |
+| Create files inside an existing allowed subdirectory | Allowed, subject to other denies |
+
+For example, an absent workspace `.env` restricts directory entry changes at the
+workspace root. `lilbox check` warns for each affected parent; `--strict` fails on
+these warnings.
+
+- No host placeholder files or directories are created.
+- This is more restrictive than Seatbelt's handling of future paths.
+- For a different boundary, use a custom profile with credential protection
+  disabled and a reviewed deny list. Configuration protection remains mandatory.
+
+### Linux runtime isolation
+
+| Resource | Behavior in both modes |
+| --- | --- |
+| Namespaces | Private user, PID, IPC, and UTS namespaces. |
+| `/proc` | Shows sandbox processes. |
+| `/dev` | Standard devices, fd links, and private PTYs. |
+| `/sys` | Empty, read-only mount. |
+| Explicit policy paths inside `/proc`, `/dev`, or `/sys` | Rejected; these trees are reserved for the runtime. |
+| Capabilities | Dropped. |
+| Ordinary processes and threads | Allowed; `clone3` returns `ENOSYS` for fallback to `clone`. |
+
+The seccomp filter rejects:
+
+- Other syscall ABIs and x32.
+- Namespace creation and mount changes.
+- Ptrace/process-memory access and open-by-handle.
+- Kernel keyring access, BPF, and terminal injection ioctls.
+- io_uring, whose socket operations could bypass ordinary syscall filtering.
+
+This is a focused filter, not a complete syscall allowlist or a VM. Nested sandbox
+tools may fail under these restrictions.
+
+### Linux networking and certificates
+
+| Policy | Behavior |
+| --- | --- |
+| Online | Shares host networking, including accessible host Unix sockets. |
+| Offline | Private network namespace; blocks socket creation, including TCP, UDP, Unix, and socketpairs. |
+| Offline exception | Route-netlink inside the private namespace is available for bubblewrap loopback setup. |
+
+- System CA files under the starter `/etc` and `/usr` grants remain readable;
+  custom CA files need explicit grants. TLS verification stays enabled.
+- Inherited standard I/O must not carry an unwanted network capability.
+- Online desktop services can expose secrets through Unix sockets; filesystem
+  denial alone does not block service-mediated access.
+
+See [network policy and trust services](security.md#networking-and-certificates)
+for the cross-platform boundary.
+
+### Linux launch behavior
+
+| Feature | Behavior |
+| --- | --- |
+| Environment and limits | Shared filtering, umask, and core-limit rules apply. |
+| Extra descriptors | Only backend-owned filter/mask descriptors survive lilbox cleanup; bubblewrap consumes them before target execution. |
+| Process lifecycle | Bubblewrap supervises the PID namespace and preserves exit codes; signal deaths return `128 + signal`. |
+| Shell fallback | `/bin/sh` when `SHELL` is unset. |
+| `--print-policy` | Quoted arguments and a syscall-filter summary. Descriptor placeholders make this an inspection format, not a standalone shell command. |
+
+The Seatbelt runtime tables below describe macOS operations, not Linux Mach
+services or sysctl policy.
 
 ## Shipped profile comparison
 

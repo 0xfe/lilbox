@@ -14,8 +14,10 @@ basic runtime operations, and scratch storage. Do not confuse either mode with a
 VM or separate user account.
 
 Read [README.md](README.md) for usage,
-[docs/design.md](docs/design.md) for architecture, and
-[docs/profiles.md](docs/profiles.md) for effective permissions. [plan.md](plan.md)
+[docs/design.md](docs/design.md) for architecture,
+[docs/profiles.md](docs/profiles.md) for effective permissions,
+[docs/security.md](docs/security.md) for security boundaries, and
+[docs/development.md](docs/development.md) for testing and releases. [plan.md](plan.md)
 is a historical implementation/verification record.
 
 ## Code map
