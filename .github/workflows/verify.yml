@@ -28,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             suite: seatbelt
           - os: macos-15-intel
@@ -58,7 +58,22 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Install Linux build and sandbox dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools python3 ca-certificates
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap musl-tools python3 ca-certificates apparmor
+      - name: Permit bubblewrap user namespaces on the disposable runner
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu 24.04 restricts capabilities in unprivileged user namespaces.
+          # Grant only bwrap the permission it needs; leave the global restriction on.
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          /usr/bin/bwrap flags=(unconfined) {
+            userns,
+          }
+          PROFILE
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          # Fail here if the host cannot support the tests; never skip enforcement.
+          /usr/bin/bwrap --unshare-user --unshare-pid --unshare-net \
+            --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
       - name: Formatting, lint, and portable tests
         run: |
           cargo fmt --all -- --check

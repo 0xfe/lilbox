@@ -129,7 +129,7 @@ Review narrow grants with `lilbox check` and `--print-policy`. See the
 | Failure | What to check |
 | --- | --- |
 | macOS `sandbox_apply: Operation not permitted` | Nested Seatbelt initialization may be blocked. Try an ordinary terminal. |
-| Linux namespace or seccomp failure | Check host/container restrictions and AppArmor policy; bubblewrap requires user namespaces and seccomp. |
+| Linux namespace or seccomp failure | Check host/container restrictions and AppArmor policy; bubblewrap requires user namespaces and seccomp. Ubuntu's unprivileged-user-namespace restrictions can produce `setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR`. The host administrator must permit bubblewrap's namespaces. |
 | An agent's inner sandbox fails | Review the agent's sandbox settings; lilbox does not change them automatically. |
 | Missing launcher, invalid policy, or unsupported platform | Install the required backend or correct the profile. |
 

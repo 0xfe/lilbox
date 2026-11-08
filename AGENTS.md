@@ -153,6 +153,9 @@ publish a release merely to test automation.
 `target/` and `dist/` are ignored build outputs.
 
 CI runs portable checks, host enforcement, and packaging on Linux/macOS. Do not claim an unexecuted platform or CI run was verified.
+The disposable Ubuntu CI runners load a bwrap-specific AppArmor `userns` grant
+and probe namespace startup; do not disable enforcement tests or add host-policy
+changes to the installed CLI/installer to work around runner restrictions.
 
 ## Documentation must stay current
 

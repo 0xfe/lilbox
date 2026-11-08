@@ -80,11 +80,15 @@ main() {
     [ "${actual%% *}" = "$expected" ] || { echo 'Checksum verification failed.' >&2; exit 1; }
     tar -xzf "$scratch/$name.tar.gz" -C "$scratch" "$name/lilbox"
     binary=$scratch/$name/lilbox
-    [ -f "$binary" ] && [ ! -L "$binary" ] || { echo 'Invalid release executable.' >&2; exit 1; }
+    if [ ! -f "$binary" ] || [ -L "$binary" ]; then
+        echo 'Invalid release executable.' >&2
+        exit 1
+    fi
     destination=$prefix/bin/lilbox
-    [ ! -L "$destination" ] && [ ! -d "$destination" ] || {
-        echo "Refusing to replace a symlink or directory: $destination" >&2; exit 1;
-    }
+    if [ -L "$destination" ] || [ -d "$destination" ]; then
+        echo "Refusing to replace a symlink or directory: $destination" >&2
+        exit 1
+    fi
     mkdir -p "$prefix/bin"
     pending=$(mktemp "$prefix/bin/.lilbox.XXXXXXXX")
     cp "$binary" "$pending"

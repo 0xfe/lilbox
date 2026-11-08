@@ -62,6 +62,13 @@ and CLI tests, installer/release-script tests, real sandbox enforcement, and the
 packaged executable. CI uploads temporary Actions artifacts; it never creates
 GitHub releases. A successful local run does not verify other platforms or remote CI.
 
+The macOS jobs use `macos-15` (ARM64) and `macos-15-intel`. On the disposable
+Ubuntu 24.04 runners, CI loads an AppArmor profile granting `/usr/bin/bwrap` the
+`userns` permission, then probes user/PID/network namespace startup before tests.
+Ubuntu's global unprivileged-user-namespace restriction stays enabled. This is
+runner provisioning only: lilbox and its installer never change host AppArmor
+policy. All enforcement tests still run as the unprivileged runner user.
+
 ## Publish a release
 
 1. Update `Cargo.toml`, refresh `Cargo.lock`, and update `CHANGELOG.md` and README.
