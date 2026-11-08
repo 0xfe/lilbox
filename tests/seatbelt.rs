@@ -90,6 +90,45 @@ fn denied(output: &Output) {
 
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
+fn startup_display_reports_version_profile_and_command_on_stderr() {
+    let f = Fixture::new();
+    for (profile_args, profile) in [(vec![], "default"), (vec!["-p", "isolated"], "isolated")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_lilbox"))
+            .env_clear()
+            .env("HOME", &f.home)
+            .current_dir(&f.work)
+            .arg("--config-dir")
+            .arg(&f.config)
+            .args(profile_args)
+            .args(["exec", "/usr/bin/printf", "%s", "two words"])
+            .output()
+            .unwrap();
+        succeeds(&output);
+        assert_eq!(output.stdout, b"two words");
+        let banner = String::from_utf8(output.stderr).unwrap();
+        assert!(banner.contains(&format!("lilbox {}", env!("CARGO_PKG_VERSION"))));
+        assert!(banner.contains(&format!("├ profile  {profile}")));
+        assert!(banner.contains(r#"└ command  /usr/bin/printf "%s" "two words""#));
+        assert!(!banner.contains('\x1b'));
+    }
+    let output = f
+        .command("default")
+        .args(["shell", "-c", "exit 0"])
+        .output()
+        .unwrap();
+    succeeds(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(r#"└ command  /bin/zsh -f -i -c "exit 0""#)
+    );
+    let output = f.command("default").arg("--print-policy").output().unwrap();
+    succeeds(&output);
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("(version 1)"));
+}
+
+#[test]
+#[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn open_mode_denies_credentials_in_children_and_through_aliases() {
     let f = Fixture::new();
     succeeds(&f.run("default", &["/bin/cat", "allowed"]));

@@ -32,7 +32,7 @@ the working directory is a grant root, not a detected Git repository root.
 
 | Component | Responsibility |
 | --- | --- |
-| [src/main.rs](../src/main.rs) | Clap CLI, profile selection, launch context, command selection, error reporting. |
+| [src/main.rs](../src/main.rs) | Clap CLI, embedded version, profile selection, launch context, command selection, startup display, error reporting. |
 | [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking, atomic initialization. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
 | [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
@@ -64,13 +64,15 @@ flowchart TD
     Backend --> Inspect{Print policy?}
     Inspect -->|Yes| Print[Render native policy and exit]
     Inspect -->|No| Prepare[Select command and prepare scratch directory]
-    Prepare --> Harden[Clear environment, close extra FDs, set limits]
+    Prepare --> Summary[Print version, profile, and command to stderr]
+    Summary --> Harden[Clear environment, close extra FDs, set limits]
     Harden --> Exec[Replace process with sandbox launcher]
     Exec --> Child[Run target under inherited OS restrictions]
 ```
 
 1. With no command and no `--print-policy`, help is printed successfully before
-   requiring configuration or a backend. `--version` is supplied by Clap.
+   requiring configuration or a backend. Help and `-v` / `--version` (also `-V`)
+   show the package version embedded at compile time from `Cargo.toml`.
 2. `HOME` must be present and absolute. The configuration directory comes from
    `--config-dir`, otherwise nonempty absolute `XDG_CONFIG_HOME` plus `/lilbox`,
    otherwise `~/.config/lilbox`. Relative `--config-dir` paths use the launch CWD.
@@ -83,8 +85,13 @@ flowchart TD
    resolved native rules without launching a command or creating scratch storage.
    It cannot be combined with a command. It validates configuration/environment
    settings, but does not ask the kernel to compile or enforce the rendered policy.
-6. A launch selects the command, prepares scratch storage if requested, and invokes
-   the backend command with the sanitized environment.
+6. A launch selects the command, prepares scratch storage if requested, prints and
+   flushes a startup summary to stderr, and invokes the backend command with the
+   sanitized environment. The summary shows the embedded version, selected profile
+   name, and actual command including shell startup flags. Complex arguments are
+   quoted and terminal controls/non-UTF-8 bytes escaped for display only. Color
+   requires a stderr terminal, no `NO_COLOR`, and a TERM other than `dumb`.
+   Inspection and configuration commands have no startup summary.
 7. On Unix, `CommandExt::exec` replaces lilbox with
    `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>` or
    `/usr/bin/bwrap <mount/namespace/filter arguments> -- <program> <args...>`.

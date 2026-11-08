@@ -6,14 +6,21 @@ fn cli() -> Command {
 
 #[test]
 fn help_version_and_missing_command() {
-    let output = cli().output().unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
-    let output = cli().arg("--version").output().unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        format!("lilbox {}", env!("CARGO_PKG_VERSION"))
-    );
+    let version = format!("lilbox {}", env!("CARGO_PKG_VERSION"));
+    for args in [vec![], vec!["-h"], vec!["--help"]] {
+        let output = cli().env_clear().args(args).output().unwrap();
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("Usage:"));
+        assert!(help.contains(&version), "{help}");
+        assert!(output.stderr.is_empty());
+    }
+    for flag in ["-v", "-V", "--version"] {
+        let output = cli().env_clear().arg(flag).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), version);
+        assert!(output.stderr.is_empty());
+    }
     assert!(!cli().arg("exec").output().unwrap().status.success());
 }
 

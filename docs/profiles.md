@@ -26,6 +26,12 @@ has a built-in fallback; `isolated` requires its file, usually created by `init`
 Profiles are standalone unless they declare `extends = "NAME"`. See the
 inheritance rules below; both shipped profiles remain standalone.
 
+Before a launch, lilbox displays its embedded version, selected profile name, and
+command (including shell startup flags) on stderr. Arguments are quoted and
+control characters escaped for display; the original arguments are passed directly
+to the command. The summary is colored on terminals unless `NO_COLOR` is set or
+`TERM=dumb`. Help, version, `init`, `check`, and `--print-policy` omit this summary.
+
 `init` preserves existing files. Installing a new lilbox does not rewrite user
 TOML, but changes to shared policy code still affect existing profiles.
 `--print-policy` shows resolved Seatbelt rules or quoted bubblewrap arguments

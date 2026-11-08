@@ -36,6 +36,7 @@ just install                  # installs ~/.local/bin/lilbox
 export PATH="$HOME/.local/bin:$PATH"
 
 lilbox                        # help
+lilbox -v                     # embedded binary version (also --version)
 lilbox codex                  # launch Codex from PATH
 lilbox claude                 # launch Claude from PATH
 lilbox shell                  # interactive shell, user startup files disabled
@@ -71,11 +72,28 @@ lilbox [OPTIONS] <PROGRAM> [ARGS...]
 
 | Command | Purpose |
 | --- | --- |
+| `lilbox -v`, `-V`, `--version` | Print the embedded binary version. |
 | `lilbox shell` | Start an interactive shell without user startup files. |
 | `lilbox exec <PROGRAM> [ARGS...]` | Run a program, including names that overlap lilbox commands. |
 | `lilbox init` | Create missing starter profiles. |
 | `lilbox [-p NAME] check [--strict]` | Check all profiles, or one profile and its parents. |
 | `lilbox [-p NAME] --print-policy` | Inspect the resolved sandbox policy. |
+
+The version from `Cargo.toml` is baked into the binary and appears in help and
+`-v` / `--version` output (`-V` also works). Before launching a command, lilbox
+prints a compact summary to stderr:
+
+```text
+  lilbox 0.2.0
+  ├ profile  default
+  └ command  cargo test
+```
+
+The summary uses color on terminals unless `NO_COLOR` is set or `TERM=dumb`.
+It shows the selected profile and command arguments, quoting complex arguments
+and escaping control characters for display. Shell launches include their startup
+flags. Standard output remains the command's output; help, version, `init`,
+`check`, and `--print-policy` do not print a launch summary.
 
 Put lilbox options **before** the command; subsequent arguments go to the program.
 Use an explicit shell for pipelines:

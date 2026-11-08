@@ -1,15 +1,24 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use lilbox::{backend, check, config, environment, launch, policy::ContextPaths};
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    io::{IsTerminal, Write},
+    path::PathBuf,
+};
 
 #[derive(Parser, Debug)]
 #[command(
     version,
+    disable_version_flag = true,
+    before_help = concat!("lilbox ", env!("CARGO_PKG_VERSION")),
     about = "Run coding agents and commands in a configurable OS sandbox",
     after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox --print-policy\n\nRun `lilbox init` to create example profiles."
 )]
 struct Cli {
+    /// Print version
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     /// Profile name (launch default: default; check default: all profiles)
     #[arg(short, long)]
     profile: Option<String>,
@@ -102,7 +111,8 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let loaded = config::load_resolved(&paths.config, cli.profile.as_deref().unwrap_or("default"))?;
+    let profile_name = cli.profile.as_deref().unwrap_or("default");
+    let loaded = config::load_resolved(&paths.config, profile_name)?;
     let policy = loaded.policy(&paths)?;
     let profile = loaded.profile;
     let child_environment = environment::build(&profile, &paths, std::env::vars_os())?;
@@ -134,7 +144,48 @@ fn run() -> Result<()> {
     if profile.runtime.temporary_directory {
         launch::prepare_temporary(&paths.temporary)?;
     }
+    print_startup(profile_name, &argv)?;
     launch::execute(backend.as_ref(), &policy, &argv, child_environment)
+}
+
+fn startup_banner(profile: &str, argv: &[OsString], color: bool) -> String {
+    // Quote complex arguments for display only. Execution retains the original
+    // OsStrings, including non-UTF-8 bytes; Debug escapes terminal controls.
+    let command = argv
+        .iter()
+        .map(|arg| match arg.to_str() {
+            Some(text)
+                if !text.is_empty()
+                    && text
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._/:=+,".contains(&b)) =>
+            {
+                text.to_owned()
+            }
+            _ => format!("{arg:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (accent, dim, reset) = if color {
+        ("\x1b[1;36m", "\x1b[2m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    format!(
+        "  {accent}lilbox {}{reset}\n  {dim}├ profile{reset}  {profile}\n  {dim}└ command{reset}  {command}\n",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn print_startup(profile: &str, argv: &[OsString]) -> Result<()> {
+    let mut stderr = std::io::stderr().lock();
+    let color = stderr.is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var_os("TERM").is_none_or(|term| term != "dumb");
+    stderr
+        .write_all(startup_banner(profile, argv, color).as_bytes())
+        .context("cannot write startup display")?;
+    stderr.flush().context("cannot flush startup display")
 }
 
 fn main() {
@@ -147,6 +198,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_display_quotes_arguments_and_escapes_terminal_controls() {
+        let argv =
+            ["printf", "two words", "", "a\"b", "\n\x1b[31m", "$(whoami)"].map(OsString::from);
+        let banner = startup_banner("work", &argv, false);
+        assert!(banner.contains("├ profile  work"));
+        assert!(
+            banner
+                .contains(r#"└ command  printf "two words" "" "a\"b" "\n\u{1b}[31m" "$(whoami)""#)
+        );
+        assert!(!banner.contains('\x1b'));
+        assert_eq!(banner.lines().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_display_preserves_non_utf8_argument_distinctions() {
+        use std::os::unix::ffi::OsStringExt;
+        let argv = [OsString::from_vec(vec![b'a', 0xff])];
+        assert!(startup_banner("default", &argv, false).contains(r#""a\xFF""#));
+    }
+
     #[test]
     fn arguments_after_program_are_opaque() {
         let cli = Cli::try_parse_from([
