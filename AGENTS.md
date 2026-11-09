@@ -165,6 +165,11 @@ and failure recovery. `install.sh` initializes missing profiles after replacing
 the executable; initialization failure must report a partial install and exit
 nonzero. Keep CI's `scripts/test_release.py --binary PATH` pointing at its native
 target binary, and never use real user configs as installer fixtures.
+`just release-installer` separately publishes the local `install.sh` using
+authenticated gcloud to `gs://muthanna.com/lilbox/install.sh`, with public-read
+access, five-minute caching, shell syntax validation, and byte readback. User-facing
+installation links use `https://mo.town/lilbox/install.sh`. Keep deployment tests
+offline with stubbed gcloud; CI and binary releases must not upload to this bucket.
 `target/` and `dist/` are ignored build outputs.
 
 CI runs portable checks, host enforcement, and packaging on Linux/macOS. Do not claim an unexecuted platform or CI run was verified.

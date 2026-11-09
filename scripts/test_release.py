@@ -170,6 +170,27 @@ esac
         self.assertTrue((self.home / '.local/bin/lilbox').is_file())
         self.assertIn('/releases/latest', self.log.read_text())
 
+    def test_progress_follows_work_and_stops_at_failed_verification(self):
+        archive = self.archive()
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        stages = ['Checking platform', 'Selected platform:', 'Finding the latest stable release',
+                  'Preparing lilbox', 'Downloading ' + archive.name,
+                  'Downloading ' + archive.name + '.sha256', 'Verifying the archive SHA-256 checksum',
+                  'Extracting the executable', 'Copying the executable', 'Checking the executable version',
+                  'Installing ' + str(self.prefix), 'Initializing missing profiles', 'Installed and ready']
+        output = result.stdout.decode()
+        positions = [output.index(stage) for stage in stages]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn('\x1b', output)
+        archive.write_bytes(b'corrupt download')
+        result = self.install('--version', VERSION)
+        self.assert_failed(result)
+        self.assertIn(b'Verifying the archive', result.stdout)
+        for stage in ('Finding the latest stable release', 'Extracting the executable',
+                      'Copying the executable', 'Initializing missing profiles', 'Installed and ready'):
+            self.assertNotIn(stage.encode(), result.stdout)
+
     def test_failures_preserve_existing_binary_and_clean_up(self):
         destination = self.prefix / 'bin/lilbox'
         destination.parent.mkdir(parents=True)
@@ -282,7 +303,7 @@ esac
 
     def test_terminal_colors_and_opt_out(self):
         self.archive()
-        self.assertIn(b'\x1b[1;36m', self.terminal_install())
+        self.assertIn('\x1b[1;36m→\x1b[0m Checking platform'.encode(), self.terminal_install())
         for value in ('', '1'):
             self.env['NO_COLOR'] = value
             self.assertNotIn(b'\x1b', self.terminal_install())
@@ -303,6 +324,92 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(b'export PATH=', result.stdout)
 
+
+
+class InstallerUploadTest(unittest.TestCase):
+    """Exercise publication with a fake gcloud; never read credentials or upload."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='lilbox-upload-test-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.repo = self.root / 'repo with spaces'
+        (self.repo / 'scripts').mkdir(parents=True)
+        self.script = self.repo / 'scripts/release-installer.sh'
+        self.script.write_bytes((ROOT / 'scripts/release-installer.sh').read_bytes())
+        self.source = self.repo / 'install.sh'
+        self.source.write_bytes((ROOT / 'install.sh').read_bytes())
+        self.bin = self.root / 'tools'
+        self.bin.mkdir()
+        self.log = self.root / 'cloud.jsonl'
+        self.remote = self.root / 'uploaded.sh'
+        self.env = dict(os.environ, HOME=str(self.root), TMPDIR=str(self.root),
+                        CLOUDSDK_CONFIG=str(self.root / 'cloud-config'), PATH=f'{self.bin}:/usr/bin:/bin',
+                        CLOUD_LOG=str(self.log), REMOTE_OBJECT=str(self.remote), INSTALL_SOURCE=str(self.source))
+        gcloud = self.bin / 'gcloud'
+        gcloud.write_text(f'#!{sys.executable}\n' + '''
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with open(os.environ['CLOUD_LOG'], 'a') as log:
+    log.write(json.dumps(args) + '\\n')
+if os.environ.get('FAIL_GCLOUD') == args[1]:
+    sys.exit('simulated cloud failure')
+remote = pathlib.Path(os.environ['REMOTE_OBJECT'])
+if args[:2] == ['storage', 'cp']:
+    if os.environ.get('EDIT_SOURCE'):
+        pathlib.Path(os.environ['INSTALL_SOURCE']).write_text('# Edited during upload\\n')
+    remote.write_bytes(pathlib.Path(args[2]).read_bytes())
+elif args[:2] == ['storage', 'cat']:
+    sys.stdout.buffer.write(b'mismatched readback' if os.environ.get('CORRUPT_READBACK') else remote.read_bytes())
+else:
+    sys.exit('unexpected cloud command')
+''')
+        gcloud.chmod(0o755)
+
+    def upload(self, *args):
+        return subprocess.run(['bash', str(self.script), *args], cwd=self.root, env=self.env,
+                              capture_output=True, text=True, timeout=15)
+
+    def test_exact_object_metadata_snapshot_and_readback(self):
+        original = self.source.read_bytes()
+        self.env['EDIT_SOURCE'] = '1'
+        result = self.upload()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:2], ['storage', 'cp'])
+        staged = Path(calls[0][2])
+        self.assertNotEqual(staged, self.source)
+        self.assertEqual(calls[0][3:], ['gs://muthanna.com/lilbox/install.sh', '--predefined-acl=publicRead',
+                                      '--cache-control=public,max-age=300,must-revalidate', '--content-type=text/plain'])
+        self.assertEqual(calls[1], ['storage', 'cat', 'gs://muthanna.com/lilbox/install.sh'])
+        self.assertEqual(self.remote.read_bytes(), original)
+        self.assertIn('Published https://mo.town/lilbox/install.sh', result.stdout)
+        self.assertFalse(staged.parent.exists())
+
+    def test_cloud_failures_and_readback_mismatch_never_report_success(self):
+        for setting, value in [('FAIL_GCLOUD', 'cp'), ('FAIL_GCLOUD', 'cat'), ('CORRUPT_READBACK', '1')]:
+            with self.subTest(setting=setting, value=value):
+                self.env[setting] = value
+                result = self.upload()
+                self.env.pop(setting)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('Published ', result.stdout)
+                self.assertEqual(list(self.root.glob('lilbox-installer-upload.*')), [])
+        self.assertIn('does not match', result.stderr)
+
+    def test_invalid_script_fails_before_cloud_access(self):
+        self.source.write_text('#!/bin/sh\nif then\n')
+        result = self.upload()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.log.exists())
+        self.assertEqual(list(self.root.glob('lilbox-installer-upload.*')), [])
+
+    def test_help_and_bad_arguments_do_not_publish(self):
+        result = self.upload('--help')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('https://mo.town/lilbox/install.sh', result.stdout)
+        self.assertNotEqual(self.upload('--clean').returncode, 0)
+        self.assertFalse(self.log.exists())
 
 
 class VersionFlowTest(unittest.TestCase):

@@ -26,17 +26,26 @@ Install the latest binary for macOS (Apple Silicon or Intel) or Linux (ARM64 or
 x86_64) to `~/.local/bin`.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh
+curl -fsSL https://mo.town/lilbox/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Choose an alternate installation prefix or a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh -s -- --prefix /usr/local --version 0.3.1
+curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.3.1
 ```
 
-`/usr/bin/sandbox-exec`. Install your coding agent separately.
+The installer reports download, checksum, copy, and initialization progress, then
+shows config paths and quick-start commands. It creates missing profiles without
+overwriting existing configs. Color follows terminal output and respects
+`NO_COLOR` and `TERM=dumb`.
+
+Linux needs `/usr/bin/bwrap` (bubblewrap 0.6.3+), permitted user namespaces,
+seccomp, and public CA certificates; macOS needs `/usr/bin/sandbox-exec`.
+Install your coding agent separately. See [installer details](docs/development.md#binary-installer)
+for requirements and [installer publication](docs/development.md#publish-the-hosted-installer)
+for `just release-installer`.
 
 To build from source, install Rust/Cargo 1.85+ and
 [Just](https://github.com/casey/just), then run `just build` and `just install`.

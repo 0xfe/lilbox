@@ -436,11 +436,20 @@ version, verifies the downloaded checksum and embedded version, then atomically
 replaces the executable under the requested prefix. It invokes the installed
 binary's `init` command, sharing the CLI's non-overwriting profile creation and
 HOME/XDG config resolution. Initialization errors report a partial installation
-and a retry command; successful installs show terminal-aware color, a box logo,
+and a retry command. Progress messages show download, verification, copy, and
+initialization stages; successful installs show terminal-aware color, a box logo,
 config/executable locations, and usage/PATH guidance. It does not install sandbox
 backends. Installer regression tests use the built native executable and temporary
 homes to check config preservation. See [development.md](development.md) for release
 and installer requirements.
+
+`just release-installer` invokes `scripts/release-installer.sh` independently of
+GitHub binary publication. It stages and syntax-checks the local installer, uses
+gcloud to publish a single publicly readable object with a five-minute cache,
+and verifies a GCS readback. The public URL is
+`https://mo.town/lilbox/install.sh`; the backing object is
+`gs://muthanna.com/lilbox/install.sh`. Binary and checksum downloads remain on
+GitHub Releases. CI tests this uploader with a stubbed gcloud, without publishing.
 
 CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 

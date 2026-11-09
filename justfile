@@ -39,6 +39,7 @@ test-release:
     cargo build --locked
     bash -n scripts/release.sh
     bash -n scripts/request-release.sh
+    bash -n scripts/release-installer.sh
     sh -n install.sh
     python3 scripts/test_release.py --binary target/debug/lilbox
 
@@ -69,6 +70,10 @@ bump version="":
 # Prepare an optional version, or publish the current clean, pushed main version.
 release version="":
     bash scripts/request-release.sh "$1"
+
+# Publish the local installer to https://mo.town/lilbox/install.sh using gcloud.
+release-installer:
+    bash scripts/release-installer.sh
 
 # Print the package version used for releases.
 version:

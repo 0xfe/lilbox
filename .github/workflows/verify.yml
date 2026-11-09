@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           GOBIN="$RUNNER_TEMP/tools" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$RUNNER_TEMP/tools/actionlint" -color
-          shellcheck install.sh scripts/release.sh scripts/request-release.sh
+          shellcheck install.sh scripts/release.sh scripts/request-release.sh scripts/release-installer.sh
   test:
     name: ${{ matrix.target }}
     strategy:
@@ -81,6 +81,7 @@ jobs:
           cargo test --locked --target "$TARGET"
           bash -n scripts/release.sh
           bash -n scripts/request-release.sh
+          bash -n scripts/release-installer.sh
           sh -n install.sh
           python3 scripts/test_release.py --binary "target/$TARGET/debug/lilbox"
       - name: Real host enforcement

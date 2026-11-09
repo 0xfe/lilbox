@@ -192,6 +192,10 @@ it verifies checksums, contents, version flags, and launches with both profiles.
 
 ## Binary installer
 
+```sh
+curl -fsSL https://mo.town/lilbox/install.sh | sh
+```
+
 [`install.sh`](../install.sh) defaults to the latest stable GitHub release and
 `~/.local/bin`. `--version X.Y.Z` (optionally prefixed with `v`) pins a release;
 `--prefix /absolute/path` installs to `PREFIX/bin`. The script works with POSIX
@@ -211,7 +215,10 @@ the installer exits unsuccessfully, explains that the binary was installed, and
 prints the command to retry after fixing the config-directory problem. Some
 missing profiles may already have been created; retrying is safe.
 
-The completion screen includes a box logo, executable/config paths, a quoted PATH
+Progress messages identify platform selection, release lookup, archive/checksum
+downloads, checksum verification, extraction, copying, executable validation,
+installation, and profile initialization. The completion screen includes a box
+logo, executable/config paths, a quoted PATH
 command when needed, quick-start commands, and a reminder of the default profile's
 broad access. Color follows stdout's terminal status (so `curl | sh` still uses
 color interactively), and is disabled by `NO_COLOR` (even empty) or `TERM=dumb`.
@@ -229,6 +236,33 @@ Downloads are fixture-backed; tests never contact GitHub or modify real profiles
 Checksums detect damaged or mismatched downloads; they are distributed from the
 same GitHub release and are not an independent signing trust root. macOS binaries
 are unsigned and not notarized.
+
+## Publish the hosted installer
+
+```sh
+just test-release
+just release-installer
+```
+
+The standalone installer is served at **https://mo.town/lilbox/install.sh**.
+[`scripts/release-installer.sh`](../scripts/release-installer.sh) follows
+[Jungle's upload script](https://github.com/0xfe/jungle/blob/main/upload.sh): it
+uses authenticated Google Cloud CLI (`gcloud storage cp`) to upload the current
+local `install.sh` to `gs://muthanna.com/lilbox/install.sh`. `mo.town` and
+`muthanna.com` serve the same bucket; use the `mo.town` URL in installation commands.
+Install and authenticate gcloud with an account allowed to write that object.
+
+The script stages a snapshot, checks its shell syntax, uploads only that object
+with `publicRead`, `Content-Type: text/plain`, and
+`Cache-Control: public,max-age=300,must-revalidate`, then reads it back from GCS
+and compares the bytes. A failed upload or mismatch exits unsuccessfully. Public
+caches may take up to five minutes to refresh. Avoid concurrent installer uploads.
+
+This command publishes the local installer independently of binary releases; it
+does not bump, commit, push, or dispatch GitHub Actions. Ordinary CI and
+`just release` do not upload to this bucket. The hosted installer still downloads
+binaries/checksums from GitHub Releases. Deployment tests stub gcloud and never
+write to the real bucket.
 
 ## Extend lilbox
 

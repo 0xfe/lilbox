@@ -1,5 +1,5 @@
 #!/bin/sh
-# Usage: curl -fsSL https://raw.githubusercontent.com/0xfe/lilbox/main/install.sh | sh
+# Usage: curl -fsSL https://mo.town/lilbox/install.sh | sh
 # Keep execution inside a function so a truncated download cannot partially install.
 shell_quote() {
     printf "'"
@@ -7,8 +7,19 @@ shell_quote() {
     printf "'"
 }
 
+log_step() {
+    printf '  %s→%s %s\n' "$accent" "$reset" "$*"
+}
+
 main() {
     set -eu
+    accent='' green='' bold='' reset=''
+    if [ -t 1 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-}" != dumb ]; then
+        accent=$(printf '\033[1;36m')
+        green=$(printf '\033[1;32m')
+        bold=$(printf '\033[1m')
+        reset=$(printf '\033[0m')
+    fi
     repository=https://github.com/0xfe/lilbox
     version=
     prefix=${HOME:?HOME must be set}/.local
@@ -30,6 +41,7 @@ main() {
         esac
     done
     case "$prefix" in /*) ;; *) echo 'Installation prefix must be absolute.' >&2; exit 1 ;; esac
+    log_step 'Checking platform and installation tools'
     os=$(uname -s)
     arch=$(uname -m)
     case "$arch" in
@@ -42,6 +54,7 @@ main() {
         Linux) target=$arch-unknown-linux-musl ;;
         *) echo "Unsupported operating system: $os" >&2; exit 1 ;;
     esac
+    log_step "Selected platform: $target"
     for tool in curl tar mktemp; do
         command -v "$tool" >/dev/null 2>&1 || { echo "Required tool missing: $tool" >&2; exit 1; }
     done
@@ -54,6 +67,7 @@ main() {
         exit 1
     fi
     if [ -z "$version" ]; then
+        log_step 'Finding the latest stable release on GitHub'
         release_url=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
             --retry 3 -o /dev/null -w '%{url_effective}' "$repository/releases/latest")
         case "$release_url" in
@@ -64,15 +78,18 @@ main() {
     printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
         echo 'Version must be a stable release such as 0.3.0.' >&2; exit 1;
     }
+    log_step "Preparing lilbox $version"
     name=lilbox-$version-$target
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/lilbox-install.XXXXXXXX")
     pending=
     trap 'rm -rf "$scratch"; if [ -n "$pending" ]; then rm -f "$pending"; fi' EXIT
     trap 'exit 1' HUP INT TERM
     for suffix in .tar.gz .tar.gz.sha256; do
+        log_step "Downloading $name$suffix"
         curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 \
             "$repository/releases/download/v$version/$name$suffix" -o "$scratch/$name$suffix"
     done
+    log_step 'Verifying the archive SHA-256 checksum'
     read -r expected checksum_name < "$scratch/$name.tar.gz.sha256"
     if [ "$checksum_name" != "$name.tar.gz" ] || \
         ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
@@ -85,6 +102,7 @@ main() {
         actual=$(shasum -a 256 "$scratch/$name.tar.gz")
     fi
     [ "${actual%% *}" = "$expected" ] || { echo 'Checksum verification failed.' >&2; exit 1; }
+    log_step 'Extracting the executable'
     tar -xzf "$scratch/$name.tar.gz" -C "$scratch" "$name/lilbox"
     binary=$scratch/$name/lilbox
     if [ ! -f "$binary" ] || [ -L "$binary" ]; then
@@ -98,13 +116,17 @@ main() {
     fi
     mkdir -p "$prefix/bin"
     pending=$(mktemp "$prefix/bin/.lilbox.XXXXXXXX")
+    log_step "Copying the executable to $prefix/bin"
     cp "$binary" "$pending"
     chmod 755 "$pending"
     # Validate on the destination filesystem; TMPDIR may be mounted noexec.
+    log_step 'Checking the executable version'
     [ "$("$pending" --version)" = "lilbox $version" ] || { echo 'Release executable version mismatch.' >&2; exit 1; }
+    log_step "Installing $destination"
     mv -f "$pending" "$destination"
     pending=
     # Invoke this exact executable, even if another lilbox is already on PATH.
+    log_step 'Initializing missing profiles (existing configs are preserved)'
     if ! "$destination" init; then
         printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
         printf 'Fix the error above, then retry: ' >&2
@@ -113,13 +135,6 @@ main() {
         exit 1
     fi
     config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
-    accent='' green='' bold='' reset=''
-    if [ -t 1 ] && [ "${NO_COLOR+x}" != x ] && [ "${TERM:-}" != dumb ]; then
-        accent=$(printf '\033[1;36m')
-        green=$(printf '\033[1;32m')
-        bold=$(printf '\033[1m')
-        reset=$(printf '\033[0m')
-    fi
     printf '\n%s' "$accent"
     printf '       +-------+\n'
     printf '      /       /|\n'
