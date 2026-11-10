@@ -21,7 +21,9 @@ jobs:
           sudo apt-get update && sudo apt-get install -y shellcheck
           GOBIN="$RUNNER_TEMP/tools" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
           "$RUNNER_TEMP/tools/actionlint" -color
-          shellcheck install.sh scripts/release.sh scripts/request-release.sh scripts/release-installer.sh
+          shellcheck install.sh scripts/release.sh scripts/request-release.sh scripts/release-installer.sh scripts/upload.sh
+          python3 scripts/check-www.py
+          python3 scripts/test_www.py
   test:
     name: ${{ matrix.target }}
     strategy:

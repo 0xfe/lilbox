@@ -264,6 +264,18 @@ does not bump, commit, push, or dispatch GitHub Actions. Ordinary CI and
 binaries/checksums from GitHub Releases. Deployment tests stub gcloud and never
 write to the real bucket.
 
+## Website
+
+The landing page at **https://mo.town/lilbox/** lives in `www/index.html`, with
+embedded CSS/JavaScript and a generated icon in `www/assets/`. It needs no build
+step. Run `just serve` to preview at `http://127.0.0.1:8000/`, `just test-www` for
+static/deployment checks, and `just upload` to publish using authenticated gcloud.
+The upload target is `gs://muthanna.com/lilbox/`. Fingerprinted images upload
+before `index.html`, with one-day image caching and five-minute page caching.
+Existing bucket objects, including the separately published installer, are
+preserved. See the [website README](https://github.com/0xfe/lilbox/blob/main/www/README.md)
+for details and icon provenance.
+
 ## Extend lilbox
 
 - Configuration and network capabilities belong in the typed policy.

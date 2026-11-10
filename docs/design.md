@@ -453,6 +453,13 @@ GitHub Releases. CI tests this uploader with a stubbed gcloud, without publishin
 
 CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 
+The separate `www/` landing page is static HTML with embedded CSS/JavaScript and
+one generated image. `just upload` runs `scripts/upload.sh`, which validates and
+stages the page, publishes fingerprinted assets before the HTML to
+`gs://muthanna.com/lilbox/`, and checks the HTML readback. Its public address is
+`https://mo.town/lilbox/`. It retains previous assets and leaves the installer
+object untouched. No site build or publication is part of binary releases.
+
 ## Extending the system
 
 `Backend` exposes `render(&Policy)` and `command(&Policy)` returning fallible

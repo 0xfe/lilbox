@@ -32,7 +32,7 @@ test-sandbox:
     cargo test --locked --test "$suite" -- --ignored --test-threads=1
 
 # All portable checks.
-check: lint test test-release
+check: lint test test-release test-www
 
 # Offline installer and release automation regression tests.
 test-release:
@@ -74,6 +74,20 @@ release version="":
 # Publish the local installer to https://mo.town/lilbox/install.sh using gcloud.
 release-installer:
     bash scripts/release-installer.sh
+
+# Serve the website at http://127.0.0.1:8000/ (Python 3; no build).
+serve:
+    python3 -m http.server 8000 --bind 127.0.0.1 --directory www
+
+# Validate the website and test deployment without contacting Google Cloud.
+test-www:
+    bash -n scripts/upload.sh
+    python3 scripts/check-www.py
+    python3 scripts/test_www.py
+
+# Publish only the website to https://mo.town/lilbox/ using authenticated gcloud.
+upload:
+    bash scripts/upload.sh
 
 # Print the package version used for releases.
 version:

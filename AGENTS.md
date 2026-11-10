@@ -177,6 +177,18 @@ The disposable Ubuntu CI runners load a bwrap-specific AppArmor `userns` grant
 and probe namespace startup; do not disable enforcement tests or add host-policy
 changes to the installed CLI/installer to work around runner restrictions.
 
+## Website
+
+`www/index.html` is the single-page site at `https://mo.town/lilbox/`, with embedded
+CSS/JavaScript, Google Fonts, and a generated icon. See `www/README.md` for the
+icon prompt and editing instructions. `just serve` starts a local Python server;
+`just test-www` validates asset fingerprints and tests deployment with fake gcloud.
+`just upload` publishes only `www/assets/` and `www/index.html` to
+`gs://muthanna.com/lilbox/`, assets first, without deleting old objects or touching
+`install.sh`. Keep tests offline and user-facing URLs on mo.town. `just check`
+includes the website checks. Browser-check desktop/mobile layout and the copy
+button when changing the page, and report any unavailable browser verification.
+
 ## Documentation must stay current
 
 **Keep `docs/` updated in the same change as the implementation.** In particular,

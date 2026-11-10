@@ -1,5 +1,7 @@
 # lilbox
 
+[Website](https://mo.town/lilbox/)
+
 A small wrapper for running coding agents and untrusted commands inside an OS
 sandbox. The default profile ensures that agents don't have access to sensitive
 files, such as: `~/.ssh`, `~/.aws` etc. and environment variables (like API keys.)
