@@ -1,3 +1,6 @@
+//! Portable permissions and path resolution shared by inspection and execution.
+//! Preserve lexical and canonical aliases so symlinks cannot bypass path denies.
+
 use crate::config::{Mode, Network, Profile};
 use anyhow::{Context, Result, bail};
 use std::{
@@ -6,6 +9,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// Fixed private-path inventory, expanded against the launch home and CWD.
+/// This is not a recursive secret scan; unlisted copies and hard links can remain.
 pub const CREDENTIAL_PATHS: &[&str] = &[
     "~/.ssh",
     "~/.aws",
@@ -47,26 +52,41 @@ pub const CREDENTIAL_PATHS: &[&str] = &[
     "${CWD}/.env.local",
 ];
 
+/// Absolute launch locations used for expansion, protection, and normalization.
 #[derive(Debug, Clone)]
 pub struct ContextPaths {
+    /// Parent user's home; setting HOME does not itself grant filesystem access.
     pub home: PathBuf,
+    /// Launch working directory, also the base for relative profile paths.
     pub cwd: PathBuf,
+    /// Selected configuration directory, always protected from the target.
     pub config: PathBuf,
+    /// Persistent per-user scratch directory, granted only when requested.
     pub temporary: PathBuf,
 }
 
+/// Backend-independent permissions with deterministic, deduplicated path sets.
 #[derive(Debug)]
 pub struct Policy {
+    /// Baseline for operations not covered by a more specific rule.
     pub mode: Mode,
+    /// Effective network setting after mode-dependent defaults.
     pub network: Network,
+    /// Readable/executable subtrees, including lexical and canonical aliases.
     pub read: BTreeSet<PathBuf>,
+    /// Writable subtrees, which also grant read and executable-map access.
     pub write: BTreeSet<PathBuf>,
+    /// Exclusions that override grants and require ancestor rename protection.
     pub deny: BTreeSet<PathBuf>,
+    /// Whether the profile explicitly enables ordinary runtime operations.
     pub basic_runtime: bool,
+    /// Enables shared path denies and backend-specific credential restrictions.
     pub protect_credentials: bool,
 }
 
 impl Policy {
+    /// Expand configured paths and add credential, config, and scratch rules.
+    /// The loader adds individual inherited profile files to the resulting deny set.
     pub fn resolve(profile: &Profile, paths: &ContextPaths) -> Result<Self> {
         let mut policy = Self {
             mode: profile.mode,
@@ -104,10 +124,13 @@ impl Policy {
     }
 }
 
+/// Require text paths because native policy renderers serialize them as text.
 fn path_text(path: &Path) -> Result<&str> {
     path.to_str().context("policy paths must be valid UTF-8")
 }
 
+/// Expand the supported home/CWD prefixes and resolve both filesystem spellings.
+/// Relative paths use launch CWD, including paths inherited from another profile.
 pub fn resolve_path(input: &str, paths: &ContextPaths) -> Result<BTreeSet<PathBuf>> {
     if input.is_empty() {
         bail!("empty policy path");
@@ -152,6 +175,8 @@ pub fn path_aliases(path: &Path) -> Result<BTreeSet<PathBuf>> {
     Ok(BTreeSet::from([lexical, canonical]))
 }
 
+/// Resolve existing symlink ancestors while retaining nonexistent suffixes.
+/// A dangling symlink is an error, not a suffix we can safely append unchanged.
 pub(crate) fn canonicalize_future(path: &Path) -> Result<PathBuf> {
     match fs::canonicalize(path) {
         Ok(path) => Ok(path),
@@ -173,6 +198,7 @@ pub(crate) fn canonicalize_future(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Closed schema defaults grant no capabilities and reject ambiguous path syntax.
     #[test]
     fn closed_defaults_grant_nothing() {
         let root = tempfile::tempdir().unwrap();
@@ -196,6 +222,7 @@ mod tests {
         assert!(resolve_path("/tmp/a\nrule", &paths).is_err());
     }
 
+    /// Future descendants must follow existing aliases without accepting dangling links.
     #[cfg(unix)]
     #[test]
     fn resolves_existing_symlink_ancestors_and_rejects_dangling_links() {

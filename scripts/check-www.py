@@ -9,12 +9,15 @@ from urllib.parse import urlsplit
 
 
 class Page(HTMLParser):
+    """Collect local asset references and the canonical URL without fetching them."""
     def __init__(self):
+        """Keep canonical links separate so duplicates are rejected by validation."""
         super().__init__()
         self.references = []
         self.canonical = []
 
     def handle_starttag(self, tag, attrs):
+        """Inspect asset/link attributes and enforce the embedded-script convention."""
         attrs = dict(attrs)
         if tag == 'script' and 'src' in attrs:
             raise ValueError('Keep JavaScript embedded in index.html.')
@@ -27,6 +30,7 @@ class Page(HTMLParser):
 
 
 def validate(root):
+    """Check public URLs, flat fingerprinted assets, and every local HTML reference."""
     index = root / 'index.html'
     if index.is_symlink():
         raise ValueError('index.html must not be a symlink.')
@@ -47,6 +51,7 @@ def validate(root):
         match = re.fullmatch(r'[a-z0-9-]+-([0-9a-f]{12})\.(png|webp)', path.name)
         if path.is_symlink() or not path.is_file() or not match:
             raise ValueError(f'Expected a fingerprinted PNG/WebP file: {path.name}')
+        # Immutable caching is safe only when the filename changes with the bytes.
         digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
         if match[1] != digest:
             raise ValueError(f'Asset changed: rename {path.name} with fingerprint {digest} and update index.html.')

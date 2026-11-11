@@ -9,27 +9,39 @@ use crate::{
 use anyhow::{Context, Result};
 use std::{collections::BTreeSet, fs, io::IsTerminal, path::Path};
 
+/// Diagnostic level; warnings affect the exit status only in strict mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
+    /// Explain effective settings or dependencies without flagging a problem.
     Info,
+    /// Highlight surprising but valid precedence or host restrictions.
     Warning,
+    /// Identify invalid configuration or an unavailable launch prerequisite.
     Error,
 }
 
+/// One diagnostic associated with a profile or directory, escaped when printed.
 #[derive(Debug)]
 pub struct Finding {
+    /// Controls display and whether this finding fails a check.
     pub severity: Severity,
+    /// Profile name, or a label for directory/platform-wide diagnostics.
     pub profile: String,
+    /// Explanation without environment assignment values; escaped when printed.
     pub message: String,
 }
 
+/// Aggregated results so one invalid profile does not hide independent failures.
 #[derive(Default, Debug)]
 pub struct Report {
+    /// Findings in deterministic discovery and analysis order.
     pub findings: Vec<Finding>,
+    /// Number of selected/discovered profiles attempted, including invalid ones.
     pub profiles: usize,
 }
 
 impl Report {
+    /// Append a finding while attaching the profile that produced it.
     fn add(&mut self, severity: Severity, profile: &str, message: impl Into<String>) {
         self.findings.push(Finding {
             severity,
@@ -38,6 +50,7 @@ impl Report {
         });
     }
 
+    /// Count one severity for the summary and exit-status decision.
     pub fn count(&self, severity: Severity) -> usize {
         self.findings
             .iter()
@@ -45,10 +58,12 @@ impl Report {
             .count()
     }
 
+    /// Fail for errors, and additionally for warnings when strict was requested.
     pub fn failed(&self, strict: bool) -> bool {
         self.count(Severity::Error) > 0 || (strict && self.count(Severity::Warning) > 0)
     }
 
+    /// Print escaped diagnostics with color only when stdout supports it.
     pub fn print(&self) {
         let color = std::io::stdout().is_terminal()
             && std::env::var_os("NO_COLOR").is_none()
@@ -81,7 +96,7 @@ impl Report {
     }
 }
 
-// Profile filenames and TOML strings are untrusted terminal input.
+/// Escape controls in untrusted profile filenames and TOML diagnostic text.
 fn safe_text(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
@@ -94,12 +109,15 @@ fn safe_text(text: &str) -> String {
         .collect()
 }
 
+/// Check one inheritance chain or all discovered profiles without mutating files.
+/// Rendering checks backend support, not actual kernel enforcement or connectivity.
 pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
     let mut report = Report::default();
     let mut names = BTreeSet::new();
     if let Some(name) = selected {
         names.insert(name.to_owned());
     } else {
+        // Include the embedded fallback even when no configuration directory exists.
         names.insert("default".to_owned());
         match fs::read_dir(&paths.config) {
             Ok(entries) => {
@@ -152,6 +170,8 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
                 format!("source: {}{embedded}", source.display()),
             );
         }
+        // Collect independent path and environment errors before attempting policy
+        // resolution, which returns on its first error during an actual launch.
         let profile = &loaded.profile;
         let mut paths_valid = true;
         for (field, values) in [
@@ -205,6 +225,7 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
                 report.add(Severity::Info, &name, "closed mode explicitly allows unrestricted networking and native trust services; inherited network settings remain effective");
             }
         }
+        // Inspect scratch only if it exists. The check command must not create it.
         if profile.runtime.temporary_directory {
             match fs::symlink_metadata(&paths.temporary) {
                 Ok(_) => {
@@ -224,6 +245,8 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
                 ),
             }
         }
+        // Use the same renderer as launch, but never execute its output. A present
+        // launcher does not prove that this host permits namespaces or Seatbelt.
         if cfg!(any(target_os = "macos", target_os = "linux")) {
             match backend::current().and_then(|b| b.render(&policy)) {
                 Ok(_) => {}
@@ -263,6 +286,7 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
     Ok(report)
 }
 
+/// Explain deny/grant overlaps and inaccessible launch paths without rewriting rules.
 fn check_filesystem(
     report: &mut Report,
     name: &str,
@@ -340,6 +364,7 @@ fn check_filesystem(
     }
 }
 
+/// Detect intersections between case-insensitive exact and trailing-star patterns.
 fn patterns_overlap(a: &str, b: &str) -> bool {
     let a = a.to_ascii_uppercase();
     let b = b.to_ascii_uppercase();
@@ -347,6 +372,7 @@ fn patterns_overlap(a: &str, b: &str) -> bool {
         || environment::matches_pattern(b.trim_end_matches('*'), &a)
 }
 
+/// Report invalid rules and precedence surprises using names, never assigned values.
 fn check_environment(report: &mut Report, name: &str, profile: &config::Profile) {
     let settings = &profile.environment;
     for error in environment::validation_errors(settings) {

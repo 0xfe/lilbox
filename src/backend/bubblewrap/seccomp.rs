@@ -3,6 +3,7 @@
 use crate::config::Network;
 use anyhow::Result;
 
+/// Human-readable summary displayed alongside rendered bubblewrap arguments.
 pub fn description(network: Network) -> &'static str {
     if network == Network::Deny {
         "native ABI only; deny sockets except private NETLINK_ROUTE (bubblewrap loopback setup), socketpair, namespace creation, mount changes, ptrace/process_vm, kernel keyring, bpf, io_uring, open_by_handle_at, terminal injection; clone3 returns ENOSYS"
@@ -11,23 +12,35 @@ pub fn description(network: Network) -> &'static str {
     }
 }
 
+/// Refuse architectures whose syscall numbers and argument layout are unsupported.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn filter(_network: Network) -> Result<Vec<u8>> {
     anyhow::bail!("bubblewrap syscall filtering supports only x86_64 and aarch64 Linux")
 }
 
+/// Encode native-endian sock_filter instructions for the supported Linux ABIs.
+/// Each tuple is (opcode, true-skip, false-skip, immediate); skips are relative
+/// to the next instruction, so edits must preserve each block's branch lengths.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn filter(network: Network) -> Result<Vec<u8>> {
+    // BPF_LD | BPF_W | BPF_ABS: load a u32 from struct seccomp_data.
     const LOAD: u16 = 0x20;
+    // BPF_JMP | BPF_JEQ | BPF_K: compare the accumulator to an immediate.
     const EQ: u16 = 0x15;
+    // BPF_JMP | BPF_JSET | BPF_K: test whether any masked bit is set.
     const SET: u16 = 0x45;
+    // BPF_RET | BPF_K: terminate evaluation with a seccomp action.
     const RET: u16 = 0x06;
+    // SECCOMP_RET_ERRNO: reject the syscall with EPERM, keeping the process alive.
     const DENY: u32 = 0x0005_0000 | libc::EPERM as u32;
+    // SECCOMP_RET_KILL_PROCESS: incompatible ABIs must never reach number matching.
     const KILL: u32 = 0x8000_0000;
     #[cfg(target_arch = "x86_64")]
     let arch = 0xc000_003e;
     #[cfg(target_arch = "aarch64")]
     let arch = 0xc000_00b7;
+    // seccomp_data stores nr at byte 0, arch at byte 4, and six u64 args at
+    // byte 16. Validate the audit architecture before loading the syscall number.
     let mut code: Vec<(u16, u8, u8, u32)> = vec![
         (LOAD, 0, 0, 4),
         (EQ, 1, 0, arch),
@@ -86,6 +99,9 @@ pub fn filter(network: Network) -> Result<Vec<u8>> {
             (LOAD, 0, 0, 0),
         ]);
     }
+    // Classic BPF cannot inspect the clone3 pointer's contents. ENOSYS permits
+    // libc fallback to clone, whose first argument exposes namespace flags.
+    // 0x7e02_0000 covers NEWNS/NEWCGROUP/NEWUTS/NEWIPC/NEWUSER/NEWPID/NEWNET.
     code.extend([
         (EQ, 0, 1, libc::SYS_clone3 as u32),
         (RET, 0, 0, 0x0005_0000 | libc::ENOSYS as u32),
@@ -94,6 +110,8 @@ pub fn filter(network: Network) -> Result<Vec<u8>> {
         (SET, 0, 1, 0x7e02_0000),
         (RET, 0, 0, DENY),
         (LOAD, 0, 0, 0),
+        // Reload nr after testing clone flags. For ioctl, inspect arg1 at byte 24
+        // and reject terminal injection/control requests while allowing other I/O.
         (EQ, 0, 5, libc::SYS_ioctl as u32),
         (LOAD, 0, 0, 24),
         (EQ, 0, 1, 0x5412),
@@ -102,6 +120,8 @@ pub fn filter(network: Network) -> Result<Vec<u8>> {
         (RET, 0, 0, DENY), // TIOCLINUX
         (RET, 0, 0, 0x7fff_0000),
     ]);
+    // Serialize the 8-byte sock_filter layout explicitly rather than relying on
+    // Rust tuple layout or padding. Bubblewrap reads the resulting native bytes.
     let mut bytes = Vec::with_capacity(code.len() * 8);
     for (op, yes, no, value) in code {
         bytes.extend(op.to_ne_bytes());
@@ -115,6 +135,7 @@ pub fn filter(network: Network) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// Interpret only the emitted BPF subset against synthetic seccomp_data bytes.
     fn evaluate(filter: &[u8], arch: u32, syscall: u32, args: [u64; 6]) -> u32 {
         let mut data = [0u8; 64];
         data[..4].copy_from_slice(&syscall.to_ne_bytes());
@@ -149,6 +170,7 @@ mod tests {
         }
     }
 
+    /// Exercise branch offsets and syscall argument checks without installing a kernel filter.
     #[test]
     fn filter_enforces_abi_network_namespace_and_terminal_boundaries() {
         #[cfg(target_arch = "x86_64")]

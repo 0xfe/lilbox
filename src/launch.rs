@@ -1,7 +1,11 @@
+//! Scratch-directory validation and the final Unix process replacement.
+//! Close ambient descriptors and harden the process before entering the backend.
+
 use crate::{backend::Backend, environment::ChildEnvironment, policy::Policy};
 use anyhow::{Context, Result, bail};
 use std::{ffi::OsString, fs, path::Path};
 
+/// Create private scratch storage, or validate an existing directory without chmod.
 #[cfg(unix)]
 pub fn prepare_temporary(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
@@ -36,6 +40,7 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
+    /// Reuse secure scratch storage, but reject unsafe paths without repairing their modes.
     #[test]
     fn temporary_directory_rejects_symlinks_and_insecure_permissions() {
         let root = tempfile::tempdir().unwrap();
@@ -58,16 +63,20 @@ mod tests {
     }
 }
 
+/// Reject scratch validation where Unix ownership and mode checks are unavailable.
 #[cfg(not(unix))]
 pub fn validate_temporary(_path: &Path) -> Result<()> {
     bail!("temporary directory validation is unsupported on this platform")
 }
 
+/// Refuse setup on platforms without a supported execution backend.
 #[cfg(not(unix))]
 pub fn prepare_temporary(_path: &Path) -> Result<()> {
     bail!("no sandbox backend for this platform")
 }
 
+/// Replace lilbox with the sandbox launcher; success never returns to Rust.
+/// Only standard I/O and descriptors explicitly owned by the backend survive exec.
 #[cfg(unix)]
 pub fn execute(
     backend: &dyn Backend,
@@ -82,6 +91,7 @@ pub fn execute(
     }
     let mut prepared = backend.command(policy)?;
     let command = &mut prepared.command;
+    // Keep the File owners alive until exec, including when setup fails early.
     let preserved: Vec<i32> = prepared.files.iter().map(AsRawFd::as_raw_fd).collect();
     command.args(argv).env_clear().envs(environment);
     // Enumerate before pre_exec: no allocation, locks, or directory I/O in that
@@ -100,6 +110,8 @@ pub fn execute(
         .into_iter()
         .flatten()
         .collect();
+    // SAFETY: the callback only invokes libc operations and reads preallocated
+    // vectors. It must remain free of allocation, locks, and Rust buffered I/O.
     unsafe {
         command.pre_exec(move || {
             libc::umask(0o077);
@@ -114,6 +126,7 @@ pub fn execute(
             for fd in &descriptors {
                 libc::close(*fd);
             }
+            // Backend memfds start close-on-exec; only this allowlist is cleared.
             for fd in &preserved {
                 if libc::fcntl(*fd, libc::F_SETFD, 0) == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -126,6 +139,7 @@ pub fn execute(
         .with_context(|| format!("failed to launch {} in sandbox", argv[0].to_string_lossy()))
 }
 
+/// Fail closed instead of falling back to ordinary process execution.
 #[cfg(not(unix))]
 pub fn execute(
     _backend: &dyn Backend,

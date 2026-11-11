@@ -9,14 +9,20 @@ use std::{
     process::{Command, Output},
 };
 
+/// Disposable host filesystem used to distinguish real enforcement from setup errors.
 struct Fixture {
+    /// Own the tree until every sandboxed command in the test has finished.
     _root: tempfile::TempDir,
+    /// Fake HOME containing credentials, ordinary files, and scratch storage.
     home: PathBuf,
+    /// Granted workspace, including existing .env names to avoid incidental restrictions.
     work: PathBuf,
+    /// Protected directory holding starter and test-specific profiles.
     config: PathBuf,
 }
 
 impl Fixture {
+    /// Create fake credentials and writable fixtures entirely inside a disposable home.
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("home");
@@ -44,6 +50,7 @@ impl Fixture {
         }
     }
 
+    /// Start with a clean environment and select the fixture profile and working directory.
     fn command(&self, profile: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_lilbox"));
         cmd.env_clear()
@@ -56,6 +63,7 @@ impl Fixture {
         cmd
     }
 
+    /// Capture one real sandboxed command, retaining stderr for enforcement assertions.
     fn run(&self, profile: &str, args: &[&str]) -> Output {
         self.command(profile)
             .arg("exec")
@@ -64,11 +72,13 @@ impl Fixture {
             .unwrap()
     }
 
+    /// Write a custom profile into this fixture only.
     fn profile(&self, name: &str, source: &str) {
         fs::write(self.config.join(format!("{name}.toml")), source).unwrap();
     }
 }
 
+/// Require launch success and return UTF-8 stdout, attributing failures to the caller.
 #[track_caller]
 fn succeeds(output: Output) -> String {
     assert!(
@@ -81,6 +91,7 @@ fn succeeds(output: Output) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// Require a target access failure, rejecting bubblewrap setup errors as evidence.
 #[track_caller]
 fn denied(output: Output) {
     assert!(
@@ -103,6 +114,7 @@ fn denied(output: Output) {
     );
 }
 
+/// Open access must preserve deny protection through aliases, writes, and renames.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn open_denies_credentials_aliases_ancestor_renames_and_config() {
@@ -136,6 +148,7 @@ fn open_denies_credentials_aliases_ancestor_renames_and_config() {
     assert_eq!(fs::read_to_string(f.work.join(".env")).unwrap(), "fake env");
 }
 
+/// Granted writes reach the host while ungranted home/system paths remain inaccessible.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn closed_grants_persist_writes_and_do_not_expose_ungranted_home() {
@@ -161,6 +174,7 @@ fn closed_grants_persist_writes_and_do_not_expose_ungranted_home() {
     denied(f.run("isolated", &["/bin/sh", "-c", "mkdir /ungranted"]));
 }
 
+/// Missing denies freeze parent entries but retain writes to existing allowed children.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn future_denies_reserve_names_without_host_side_effects() {
@@ -199,6 +213,7 @@ fn future_denies_reserve_names_without_host_side_effects() {
     assert!(!f.work.join(".env").exists());
 }
 
+/// Child grants cannot expose inherited denies or externally symlinked profile sources.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn inherited_profile_symlink_targets_and_nested_deny_precedence() {
@@ -222,6 +237,7 @@ fn inherited_profile_symlink_targets_and_nested_deny_precedence() {
     succeeds(f.run("child", &["/bin/sh", "-c", "echo okay > src/allowed"]));
 }
 
+/// Online mode retains sockets and CA discovery; offline mode rejects TCP, UDP, and Unix.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn online_tcp_unix_and_public_ca_reads_offline_socket_denial() {
@@ -258,6 +274,7 @@ fn online_tcp_unix_and_public_ca_reads_offline_socket_denial() {
     ));
 }
 
+/// Check runtime hardening alongside argument fidelity, shell startup, and exit propagation.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn runtime_filters_process_visibility_environment_arguments_and_exit_status() {
@@ -284,6 +301,7 @@ fn runtime_filters_process_visibility_environment_arguments_and_exit_status() {
     );
 }
 
+/// Inject a credential FD before lilbox starts and require no extra FDs in the target.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn extra_inherited_descriptors_are_closed_and_backend_descriptors_are_consumed() {
@@ -292,6 +310,8 @@ fn extra_inherited_descriptors_are_closed_and_backend_descriptors_are_consumed()
     let secret = fs::File::open(f.home.join(".ssh/key")).unwrap();
     let source = secret.as_raw_fd();
     let mut cmd = f.command("default");
+    // Deliberately pass a normally close-on-exec secret descriptor to lilbox.
+    // The target must lose access even though no path lookup is needed to read it.
     unsafe {
         cmd.pre_exec(move || {
             if libc::dup2(source, 100) == -1 {
@@ -303,6 +323,7 @@ fn extra_inherited_descriptors_are_closed_and_backend_descriptors_are_consumed()
     succeeds(cmd.args(["exec", "/usr/bin/python3", "-c", "import os; assert not os.path.exists('/proc/self/fd/100'); assert not [fd for fd in os.listdir('/proc/self/fd') if fd.isdigit() and int(fd)>2 and os.path.exists('/proc/self/fd/'+fd)]"]).output().unwrap());
 }
 
+/// Canonical mount ordering must preserve both exclusions and nested writable grants.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn closed_symlink_grants_cannot_alias_around_denies_or_lose_nested_writes() {
@@ -334,6 +355,7 @@ fn closed_symlink_grants_cannot_alias_around_denies_or_lose_nested_writes() {
     );
 }
 
+/// Retain usable PTYs and expected exit codes after detaching the host terminal session.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn terminal_io_and_signal_exit_status() {

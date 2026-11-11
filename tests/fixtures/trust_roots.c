@@ -4,7 +4,10 @@
 #include <Security/Security.h>
 #include <stdio.h>
 
+// Fail if native trust discovery loses system roots or cannot read their settings.
 int main(void) {
+    // Query all native trust domains to catch service restrictions hidden by a
+    // direct read of the system certificate bundle.
     const SecTrustSettingsDomain domains[] = {
         kSecTrustSettingsDomainUser,
         kSecTrustSettingsDomainAdmin,
@@ -13,6 +16,7 @@ int main(void) {
     for (unsigned int d = 0; d < 3; ++d) {
         CFArrayRef certificates = NULL;
         OSStatus status = SecTrustSettingsCopyCertificates(domains[d], &certificates);
+        // User/admin overrides may legitimately be absent; system roots may not.
         if (status == errSecNoTrustSettings && domains[d] != kSecTrustSettingsDomainSystem) {
             printf("domain %u: 0 certificates\n", d);
             continue;

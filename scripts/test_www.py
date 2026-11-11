@@ -9,10 +9,13 @@ import sys
 import tempfile
 import unittest
 
+# Source checkout is read-only input; uploads operate on a disposable copy.
 ROOT = Path(__file__).resolve().parent.parent
 
 
 class UploadTest(unittest.TestCase):
+    """Check publication order and failures using a filesystem-backed fake cloud."""
+    # Copy the site into a disposable checkout and replace gcloud with a logging stub.
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lilbox-www-test-')
         self.addCleanup(self.temp.cleanup)
@@ -52,13 +55,16 @@ else:
 ''')
         gcloud.chmod(0o755)
 
+    # Run the copied uploader from an unrelated CWD with fake cloud storage.
     def upload(self):
         return subprocess.run(['bash', str(self.repo / 'scripts/upload.sh')], cwd=self.root,
                               env=self.env, capture_output=True, text=True, timeout=15)
 
+    # Decode the ordered cloud calls for destination and metadata assertions.
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
+    # Upload a frozen snapshot assets-first without touching installer or unrelated objects.
     def test_assets_before_index_and_only_website_objects(self):
         original = (self.repo / 'www/index.html').read_bytes()
         self.env['EDIT_SOURCE'] = '1'
@@ -79,6 +85,7 @@ else:
         self.assertFalse(Path(calls[1][2]).parent.exists())
         self.assertIn('Published https://mo.town/lilbox/', result.stdout)
 
+    # An asset upload failure must prevent publishing HTML that references those assets.
     def test_failed_assets_never_publish_page(self):
         self.env['FAIL_CLOUD'] = 'rsync'
         result = self.upload()
@@ -88,6 +95,7 @@ else:
         self.assertNotIn('Published ', result.stdout)
         self.assertEqual(list(self.root.glob('lilbox-site-upload.*')), [])
 
+    # Failed page writes, reads, and byte mismatches must never report publication success.
     def test_publish_and_readback_failures_are_errors(self):
         for key, value in [('FAIL_CLOUD', 'cp'), ('FAIL_CLOUD', 'cat'), ('CORRUPT_READBACK', '1')]:
             with self.subTest(key=key, value=value):
@@ -98,6 +106,7 @@ else:
                 self.assertNotIn('Published ', result.stdout)
                 self.assertEqual(list(self.root.glob('lilbox-site-upload.*')), [])
 
+    # Reject missing or stale-fingerprint assets before invoking gcloud.
     def test_changed_or_missing_icon_fails_before_upload(self):
         icon = next((self.repo / 'www/assets').iterdir())
         icon.write_bytes(b'changed without a new fingerprint')

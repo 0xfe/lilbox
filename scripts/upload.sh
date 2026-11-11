@@ -9,6 +9,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 command -v gcloud >/dev/null || { echo 'Install and authenticate the Google Cloud CLI first.' >&2; exit 1; }
 python3 scripts/check-www.py
 
+# Validate a frozen copy too, so edits during upload cannot mix page/asset versions.
 staging=$(mktemp -d "${TMPDIR:-/tmp}/lilbox-site-upload.XXXXXXXX")
 trap 'rm -rf -- "$staging"' EXIT
 cp www/index.html "$staging/index.html"

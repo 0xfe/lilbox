@@ -1,16 +1,21 @@
 #!/bin/sh
+# Download, verify, and atomically replace a native binary, then initialize profiles.
 # Usage: curl -fsSL https://mo.town/lilbox/install.sh | sh
 # Keep execution inside a function so a truncated download cannot partially install.
+
+# Print one POSIX-shell literal for copyable recovery and PATH instructions.
 shell_quote() {
     printf "'"
     printf '%s' "$1" | sed "s/'/'\\\\''/g"
     printf "'"
 }
 
+# Report a completed or starting installation step with optional terminal styling.
 log_step() {
     printf '  %s→%s %s\n' "$accent" "$reset" "$*"
 }
 
+# Install only after input/download validation; init failure reports a partial install.
 main() {
     set -eu
     accent='' green='' bold='' reset=''
@@ -20,6 +25,7 @@ main() {
         bold=$(printf '\033[1m')
         reset=$(printf '\033[0m')
     fi
+    # All release discovery and asset downloads must stay under this repository.
     repository=https://github.com/0xfe/lilbox
     version=
     prefix=${HOME:?HOME must be set}/.local
@@ -49,6 +55,7 @@ main() {
         arm64|aarch64) arch=aarch64 ;;
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
     esac
+    # Linux releases use musl so one archive per CPU works across libc variants.
     case "$os" in
         Darwin) target=$arch-apple-darwin ;;
         Linux) target=$arch-unknown-linux-musl ;;
@@ -90,6 +97,7 @@ main() {
             "$repository/releases/download/v$version/$name$suffix" -o "$scratch/$name$suffix"
     done
     log_step 'Verifying the archive SHA-256 checksum'
+    # Verify both the digest syntax and the intended archive name before extraction.
     read -r expected checksum_name < "$scratch/$name.tar.gz.sha256"
     if [ "$checksum_name" != "$name.tar.gz" ] || \
         ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
@@ -115,6 +123,8 @@ main() {
         exit 1
     fi
     mkdir -p "$prefix/bin"
+    # Stage beside the destination so the final rename stays on one filesystem.
+    # Failures before that rename leave an existing installation intact.
     pending=$(mktemp "$prefix/bin/.lilbox.XXXXXXXX")
     log_step "Copying the executable to $prefix/bin"
     cp "$binary" "$pending"

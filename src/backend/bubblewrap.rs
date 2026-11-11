@@ -1,5 +1,7 @@
-//! Mount-based filesystem policy. Missing denies require conservative read-only
-//! parents: creating mountpoints in a host bind would modify the host filesystem.
+//! Linux namespace and mount planning for bubblewrap, backed by a seccomp filter.
+//! Missing denies require read-only parents: creating mountpoints in a host bind
+//! would modify the host filesystem.
+
 use super::{Backend, SandboxCommand};
 use crate::{
     config::{Mode, Network},
@@ -18,31 +20,42 @@ use std::{
 
 mod seccomp;
 
+/// Stateless Linux backend; per-launch resources live in SandboxCommand.
 pub struct Bubblewrap;
+/// Fixed launcher location; do not resolve the enforcement tool through child PATH.
 pub const EXECUTABLE: &str = "/usr/bin/bwrap";
 
+/// Collapse lexical aliases to mount targets, including nonexistent descendants.
 fn canonical(paths: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>> {
     paths.iter().map(|p| canonicalize_future(p)).collect()
 }
 
+/// Test subtree membership by path components, not by a string prefix.
 fn covered(path: &Path, roots: &BTreeSet<PathBuf>) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
 
+/// Sort parents before descendants, with lexical ordering to break depth ties.
 fn ordered(paths: &BTreeSet<PathBuf>) -> Vec<&PathBuf> {
     let mut paths: Vec<_> = paths.iter().collect();
     paths.sort_by_key(|p| (p.components().count(), *p));
     paths
 }
 
+/// Canonical grants and exclusions plus parents restricted by absent deny paths.
 struct Mounts {
+    /// Host subtrees exposed read-only unless also covered by a write grant.
     read: BTreeSet<PathBuf>,
+    /// Host subtrees eligible for writable binds before exclusions are applied.
     write: BTreeSet<PathBuf>,
+    /// Paths masked last; descendants inherit the same exclusion.
     deny: BTreeSet<PathBuf>,
+    /// Existing parents whose entries must be frozen to reserve absent deny names.
     restricted: BTreeSet<PathBuf>,
 }
 
 impl Mounts {
+    /// Resolve mount targets and find writable parents needing missing-path protection.
     fn new(policy: &Policy) -> Result<Self> {
         let mut mounts = Self {
             read: canonical(&policy.read)?,
@@ -68,10 +81,12 @@ impl Mounts {
         Ok(mounts)
     }
 
+    /// Check baseline/grant write access; callers apply deny and parent restrictions.
     fn writable(&self, policy: &Policy, path: &Path) -> bool {
         policy.mode == Mode::Open || covered(path, &self.write)
     }
 
+    /// Check baseline/grant visibility before masking excluded subtrees.
     fn visible(&self, policy: &Policy, path: &Path) -> bool {
         self.writable(policy, path) || covered(path, &self.read)
     }
@@ -82,12 +97,15 @@ pub fn restricted_parents(policy: &Policy) -> Result<Vec<PathBuf>> {
     Ok(Mounts::new(policy)?.restricted.into_iter().collect())
 }
 
+/// Bind a host path at the same sandbox path with the requested write permission.
 fn bind(args: &mut Vec<OsString>, path: &Path, write: bool) {
     args.push(if write { "--bind" } else { "--ro-bind" }.into());
     args.push(path.into());
     args.push(path.into());
 }
 
+/// Build the ordered launcher arguments shared by inspection and execution.
+/// Descriptor suppliers allow rendering placeholders without allocating memfds.
 fn arguments(
     policy: &Policy,
     mut empty_fd: impl FnMut() -> Result<String>,
@@ -261,12 +279,16 @@ fn arguments(
     Ok(args)
 }
 
+/// Store policy bytes in an anonymous file positioned for bubblewrap to read.
+/// It remains close-on-exec until the launch layer explicitly preserves it.
 fn memory_file(name: &std::ffi::CStr, data: &[u8]) -> Result<File> {
     let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     if fd == -1 {
         return Err(std::io::Error::last_os_error())
             .context("cannot create bubblewrap policy descriptor");
     }
+    // SAFETY: memfd_create returned a fresh valid descriptor; File becomes its
+    // sole owner and closes it on any later setup error.
     let mut file = unsafe { File::from_raw_fd(fd) };
     file.write_all(data)?;
     file.rewind()?;
@@ -274,6 +296,7 @@ fn memory_file(name: &std::ffi::CStr, data: &[u8]) -> Result<File> {
 }
 
 impl Backend for Bubblewrap {
+    /// Render shell-quoted diagnostic text; execution uses the original argv vector.
     fn render(&self, policy: &Policy) -> Result<String> {
         let args = arguments(policy, || Ok("<empty-file-fd>".into()), "<seccomp-fd>")?;
         let mut output = format!(
@@ -291,6 +314,7 @@ impl Backend for Bubblewrap {
         Ok(output)
     }
 
+    /// Allocate filter/mask descriptors and retain their owners through exec.
     fn command(&self, policy: &Policy) -> Result<SandboxCommand> {
         if !Path::new(EXECUTABLE).is_file() {
             bail!("/usr/bin/bwrap is unavailable; install bubblewrap; refusing to run unsandboxed");

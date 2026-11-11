@@ -1,3 +1,6 @@
+//! Strict profile parsing, inheritance, and non-overwriting initialization.
+//! Merge raw TOML before applying defaults so omitted child fields stay omitted.
+
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::{
@@ -7,14 +10,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Open starter profile, also used when default.toml is absent.
 pub const DEFAULT_PROFILE: &str = include_str!("../profiles/default.toml");
+/// Closed starter profile written by init; it is not an automatic fallback.
 pub const ISOLATED_PROFILE: &str = include_str!("../profiles/isolated.toml");
 
+/// Baseline permissions before explicit grants, denies, and runtime capabilities.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
+    /// Permit operations unless restricted by the policy or backend hardening.
     #[default]
     Open,
+    /// Require explicit grants, including the basic runtime needed by programs.
     Closed,
 }
 
@@ -23,36 +31,52 @@ pub enum Mode {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Network {
+    /// Permit network access, including reachable Unix sockets.
     Allow,
+    /// Block network access using the backend's socket and namespace restrictions.
     Deny,
 }
 
+/// Typed schema for a single document or a fully merged inheritance chain.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// Required schema version, validated independently in every source file.
     pub version: u32,
+    /// Parent profile name; removed during resolution before the final parse.
     pub extends: Option<String>,
+    /// Default permission baseline when no more specific rule applies.
     #[serde(default)]
     pub mode: Mode,
+    /// Omission follows the final mode, unless an ancestor explicitly set it.
     pub network: Option<Network>,
+    /// Path grants and exclusions, expanded later against the launch context.
     #[serde(default)]
     pub filesystem: Filesystem,
+    /// Rules for reconstructing the environment passed to the target.
     #[serde(default)]
     pub environment: Environment,
+    /// Optional execution and scratch-storage capabilities.
     #[serde(default)]
     pub runtime: Runtime,
 }
 
+/// Unexpanded path rules; explicit denies take precedence over all grants.
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Filesystem {
+    /// Add the shared credential/private-path deny list; enabled by default.
     pub protect_credentials: bool,
+    /// Subtrees that may be read and mapped as executable code.
     pub allow_read: Vec<String>,
+    /// Subtrees that may also be modified; these include read access.
     pub allow_write: Vec<String>,
+    /// Subtrees excluded even when covered by a broader grant.
     pub deny: Vec<String>,
 }
 
 impl Default for Filesystem {
+    /// Protect credentials without adding any explicit filesystem grants.
     fn default() -> Self {
         Self {
             protect_credentials: true,
@@ -63,15 +87,21 @@ impl Default for Filesystem {
     }
 }
 
+/// Environment selection rules, applied before mandatory launch normalization.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Environment {
+    /// Omission inherits ordinary variables only when the final mode is open.
     pub inherit: Option<bool>,
+    /// Exact names or trailing-star prefixes to retain from the parent.
     pub keep: Vec<String>,
+    /// Patterns removed after inheritance and assignments, before normalization.
     pub drop: Vec<String>,
+    /// Explicit assignments; runtime injection variables are rejected.
     pub set: BTreeMap<String, String>,
 }
 
+/// Opt-in capabilities beyond the filesystem and network baseline.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Runtime {
@@ -81,6 +111,7 @@ pub struct Runtime {
     pub temporary_directory: bool,
 }
 
+/// Validate one source, then retain only its explicit TOML fields for merging.
 fn document(source: &str) -> Result<toml::Value> {
     // Validate each file before merging so an overridden bad field cannot hide.
     let profile: Profile = toml::from_str(source).map_err(|error: toml::de::Error| {
@@ -103,6 +134,7 @@ fn document(source: &str) -> Result<toml::Value> {
     Ok(toml::from_str(source)?)
 }
 
+/// Parse a standalone profile; inheritance requires a directory-aware loader.
 pub fn parse(source: &str) -> Result<Profile> {
     let value = document(source)?;
     if value.get("extends").is_some() {
@@ -111,6 +143,7 @@ pub fn parse(source: &str) -> Result<Profile> {
     Ok(value.try_into()?)
 }
 
+/// Restrict names to simple file stems so lookup cannot traverse directories.
 pub fn validate_name(name: &str) -> Result<()> {
     if name.is_empty()
         || name.len() > 64
@@ -126,12 +159,16 @@ pub fn validate_name(name: &str) -> Result<()> {
 /// A resolved profile and every file contributing to it, root first.
 #[derive(Debug)]
 pub struct LoadedProfile {
+    /// Effective fields after inheritance and schema defaults.
     pub profile: Profile,
+    /// Base-to-child paths, including the expected path of an embedded fallback.
     pub sources: Vec<PathBuf>,
+    /// Base-to-child names for explaining the effective configuration.
     pub chain: Vec<String>,
 }
 
 impl LoadedProfile {
+    /// Resolve permissions and deny every source file, including symlink targets.
     pub fn policy(&self, paths: &crate::policy::ContextPaths) -> Result<crate::policy::Policy> {
         let mut policy = crate::policy::Policy::resolve(&self.profile, paths)?;
         for source in &self.sources {
@@ -141,10 +178,12 @@ impl LoadedProfile {
     }
 }
 
+/// Load effective settings when the caller does not need dependency metadata.
 pub fn load(directory: &Path, name: &str) -> Result<Profile> {
     Ok(load_resolved(directory, name)?.profile)
 }
 
+/// Resolve the inheritance chain and apply defaults only after the final merge.
 pub fn load_resolved(directory: &Path, name: &str) -> Result<LoadedProfile> {
     let mut sources = Vec::new();
     let mut chain = Vec::new();
@@ -156,6 +195,7 @@ pub fn load_resolved(directory: &Path, name: &str) -> Result<LoadedProfile> {
     })
 }
 
+/// Recursively merge parents while recording sources and bounding recursion.
 fn resolve(
     directory: &Path,
     name: &str,
@@ -165,6 +205,8 @@ fn resolve(
 ) -> Result<toml::Value> {
     validate_name(name)?;
     let path = directory.join(format!("{name}.toml"));
+    // Different profile names can point at the same file through symlinks.
+    // Check both names and file identities to catch either kind of cycle.
     let identity = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
     if visiting.iter().any(|(n, p)| n == name || p == &identity) {
         let mut names: Vec<_> = visiting.iter().map(|(n, _)| n.as_str()).collect();
@@ -205,12 +247,16 @@ fn resolve(
         merge(&mut base, child);
         base
     };
+    // Record after recursion so diagnostics and dependency protection see the
+    // same base-to-child order used by the merge.
     visiting.pop();
     sources.push(path);
     chain.push(name.to_owned());
     Ok(merged)
 }
 
+/// Merge tables by key, append unique list entries, and replace scalar values.
+/// Empty child lists preserve inherited entries; explicit false replaces true.
 fn merge(base: &mut toml::Value, child: toml::Value) {
     match (base, child) {
         (toml::Value::Table(base), toml::Value::Table(child)) => {
@@ -260,6 +306,7 @@ pub fn init(directory: &Path) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// Reject misspellings and unsupported schemas while accepting both shipped profiles.
     #[test]
     fn strict_schema_and_versions() {
         for text in [
@@ -275,6 +322,7 @@ mod tests {
         parse(ISOLATED_PROFILE).unwrap();
     }
 
+    /// Only an absent default gets a fallback; init must preserve existing user files.
     #[test]
     fn selection_and_no_clobber() {
         let root = tempfile::tempdir().unwrap();
@@ -298,10 +346,12 @@ mod tests {
 mod inheritance_tests {
     use super::*;
 
+    /// Write one named profile inside the disposable configuration directory.
     fn put(root: &Path, name: &str, text: &str) {
         fs::write(root.join(format!("{name}.toml")), text).unwrap();
     }
 
+    /// Distinguish omission from explicit false and retain additive lists across three levels.
     #[test]
     fn merge_preserves_omissions_false_values_lists_and_map_keys() {
         let root = tempfile::tempdir().unwrap();
@@ -338,6 +388,7 @@ mod inheritance_tests {
         assert!(p.extends.is_none());
     }
 
+    /// Mode-dependent defaults must not erase explicit settings inherited from default.
     #[test]
     fn defaults_apply_after_merge_and_default_fallback_is_inherited() {
         let root = tempfile::tempdir().unwrap();
@@ -367,6 +418,7 @@ mod inheritance_tests {
         );
     }
 
+    /// Expose dependency failures and reject invalid parents even if a child overrides them.
     #[test]
     fn dependency_errors_identify_the_chain_and_reject_ambiguous_parents() {
         let root = tempfile::tempdir().unwrap();
@@ -390,6 +442,7 @@ mod inheritance_tests {
         assert!(parse("version=1\nextends='default'").is_err());
     }
 
+    /// Allow exactly 64 profiles, then reject the next recursive dependency.
     #[test]
     fn bounded_depth() {
         let root = tempfile::tempdir().unwrap();
@@ -406,6 +459,7 @@ mod inheritance_tests {
         assert!(format!("{:#}", load(root.path(), "extra").unwrap_err()).contains("exceeds 64"));
     }
 
+    /// Resolve file identity for cycles and protect parent files outside the config tree.
     #[cfg(unix)]
     #[test]
     fn symlink_cycles_dangling_parents_and_dependency_protection() {

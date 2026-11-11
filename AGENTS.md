@@ -7,12 +7,6 @@ inside an OS sandbox. Execution backends are macOS Seatbelt
 (`/usr/bin/sandbox-exec`) and Linux bubblewrap (`/usr/bin/bwrap`, x86_64/aarch64).
 Unsupported platforms and syscall ABIs must refuse execution.
 
-The default profile is intentionally permissive, especially for networking, with
-specific credential/private filesystem denies and environment scrubbing. The
-`isolated` example starts closed and explicitly grants system reads, CWD writes,
-basic runtime operations, and scratch storage. Do not confuse either mode with a
-VM or separate user account.
-
 Read [README.md](README.md) for usage,
 [docs/design.md](docs/design.md) for architecture,
 [docs/profiles.md](docs/profiles.md) for effective permissions,
@@ -202,3 +196,13 @@ resolution, backend behavior, execution, or release packaging changes. Update
 README for user-facing command/configuration changes. Keep this AGENTS.md aligned
 with build/test/release commands, and preserve release packaging of the docs.
 Describe effective permissions and their limitations, not just profile fields.
+
+## Coding style
+
+Write well commented human-readable code. Structure it for ease of human debugging,
+audit, and interpretability. Make sure all constants, functions, structs, interfaces,
+etc. are properly commented. Add a small note to the top of each file about the
+contents of the file. Ideally, break up long functions into smaller ones, but alternatively
+you can  make sure to comment long complex code bits clearly.
+
+Try to keep dependencies at a minimum, use only well-known, highly trusted dependencies.

@@ -10,13 +10,19 @@ use std::{
     process::{Command, Output},
 };
 
+/// Disposable home/workspace for testing the real macOS enforcement boundary.
 struct Fixture {
+    /// Keep fixture files alive until the test and its captured launches finish.
     _root: tempfile::TempDir,
+    /// Fake HOME with credentials and ordinary ungranted files.
     home: PathBuf,
+    /// Launch directory used by CWD-based grants and denies.
     work: PathBuf,
+    /// Protected profile directory inside the fake home.
     config: PathBuf,
 }
 impl Fixture {
+    /// Use canonical temporary paths and fake credentials, never the developer's files.
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(root.path()).unwrap();
@@ -41,6 +47,7 @@ impl Fixture {
             config,
         }
     }
+    /// Select the fixture home/config/CWD and a known shell with a clean environment.
     fn command(&self, profile: &str) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_lilbox"));
         c.env_clear()
@@ -53,6 +60,7 @@ impl Fixture {
             .args(["-p", profile]);
         c
     }
+    /// Capture one real sandboxed command for status and diagnostic assertions.
     fn run(&self, profile: &str, args: &[&str]) -> Output {
         self.command(profile)
             .arg("exec")
@@ -60,10 +68,12 @@ impl Fixture {
             .output()
             .unwrap()
     }
+    /// Write a named profile into this disposable fixture.
     fn profile(&self, name: &str, text: &str) {
         fs::write(self.config.join(format!("{name}.toml")), text).unwrap();
     }
 }
+/// Show both streams on failure and attribute the assertion to its test caller.
 #[track_caller]
 fn succeeds(output: &Output) {
     assert!(
@@ -74,6 +84,7 @@ fn succeeds(output: &Output) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+/// Require a permission diagnostic rather than accepting an arbitrary command failure.
 #[track_caller]
 fn denied(output: &Output) {
     assert!(
@@ -88,6 +99,7 @@ fn denied(output: &Output) {
     );
 }
 
+/// Keep target stdout intact and show startup details only for actual launches.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn startup_display_reports_version_profile_and_command_on_stderr() {
@@ -128,6 +140,7 @@ fn startup_display_reports_version_profile_and_command_on_stderr() {
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("(version 1)"));
 }
 
+/// Use a real PTY to check color support, NO_COLOR, and TERM=dumb.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn startup_display_colors_follow_terminal_settings() {
@@ -164,6 +177,7 @@ fn startup_display_colors_follow_terminal_settings() {
     }
 }
 
+/// Subprocesses, symlinks, and ancestor renames must not bypass open-mode exclusions.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn open_mode_denies_credentials_in_children_and_through_aliases() {
@@ -195,6 +209,7 @@ fn open_mode_denies_credentials_in_children_and_through_aliases() {
     succeeds(&f.run("default", &["/bin/sh", "-c", "echo ok > created"]));
 }
 
+/// Protect external config targets and future paths despite broad write grants.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn configured_symlinks_future_paths_and_deny_precedence() {
@@ -227,6 +242,7 @@ fn configured_symlinks_future_paths_and_deny_precedence() {
     ));
 }
 
+/// Verify closed grants, nested deny precedence, data-volume aliases, and no-runtime failure.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn closed_mode_grants_only_configured_paths_and_runtime() {
@@ -269,6 +285,7 @@ fn closed_mode_grants_only_configured_paths_and_runtime() {
     assert!(!f.run("empty", &["/usr/bin/true"]).status.success());
 }
 
+/// Test all mode/network combinations against a local TCP listener.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn network_allow_and_deny_are_enforced_in_both_modes() {
@@ -294,6 +311,7 @@ fn network_allow_and_deny_are_enforced_in_both_modes() {
     }
 }
 
+/// Network denial must block local service sockets as well as Internet protocols.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn unix_socket_connections_are_blocked_by_network_deny() {
@@ -315,6 +333,7 @@ fn unix_socket_connections_are_blocked_by_network_deny() {
     assert!(!f.run("isolated", &args).status.success());
 }
 
+/// Pass agent flags and raw OS argument bytes through the wrapper unchanged.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn named_agents_keep_their_arguments_and_non_utf8_arguments_survive() {
@@ -343,6 +362,7 @@ fn named_agents_keep_their_arguments_and_non_utf8_arguments_survive() {
     assert_eq!(output.stdout, vec![b'a', 0xff, b'b']);
 }
 
+/// Exercise environment scrubbing, literal argv, shell startup suppression, and process setup.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn environment_arguments_exit_status_shell_startup_and_umask() {
@@ -371,6 +391,7 @@ fn environment_arguments_exit_status_shell_startup_and_umask() {
     assert_eq!(output.stdout, b"SAFE\n");
 }
 
+/// A preopened credential FD must be closed, while signal termination remains observable.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn inherited_descriptors_are_closed_and_signal_status_is_preserved() {
@@ -381,6 +402,8 @@ fn inherited_descriptors_are_closed_and_signal_status_is_preserved() {
     let fd = secret.as_raw_fd();
     let mut c = f.command("default");
     c.args(["exec", "/bin/sh", "-c", "cat <&99"]);
+    // Pass an already-open credential into lilbox to exercise descriptor closure,
+    // independently of Seatbelt's path-based restrictions.
     unsafe {
         c.pre_exec(move || {
             if libc::dup2(fd, 99) < 0 {
@@ -397,6 +420,7 @@ fn inherited_descriptors_are_closed_and_signal_status_is_preserved() {
     assert_eq!(output.status.signal(), Some(libc::SIGTERM));
 }
 
+/// Use a PTY to ensure sandboxed shells retain interactive standard input and output.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn interactive_shell_retains_a_terminal_in_both_modes() {
@@ -434,6 +458,7 @@ fn interactive_shell_retains_a_terminal_in_both_modes() {
     }
 }
 
+/// Compare native public-root discovery with the host while retaining keychain-file denial.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn default_profile_preserves_native_tls_trust_roots() {
@@ -480,6 +505,7 @@ fn default_profile_preserves_native_tls_trust_roots() {
     ));
 }
 
+/// Enforce additive restrictions and protect every source even after a child opens the baseline.
 #[test]
 #[ignore = "requires a host that permits sandbox-exec; run just test-sandbox"]
 fn inherited_profiles_enforce_merged_permissions_and_protect_all_sources() {

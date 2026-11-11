@@ -1,3 +1,6 @@
+//! CLI parsing and orchestration: resolve launch context, handle inspection
+//! commands, then hand the target and sanitized environment to the OS backend.
+
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use lilbox::{backend, check, config, environment, launch, policy::ContextPaths};
@@ -7,6 +10,9 @@ use std::{
     path::PathBuf,
 };
 
+// Wrapper options stop at the selected command so target arguments stay opaque.
+// Use ordinary comments here when documenting internals: Clap turns doc comments
+// on CLI types and fields into user-facing help text.
 #[derive(Parser, Debug)]
 #[command(
     version,
@@ -28,10 +34,12 @@ struct Cli {
     /// Print the effective native sandbox policy without starting a command
     #[arg(long)]
     print_policy: bool,
+    // None selects help, except when --print-policy requests inspection.
     #[command(subcommand)]
     command: Option<Action>,
 }
 
+// Built-in actions coexist with external subcommands such as `lilbox codex`.
 #[derive(Subcommand, Debug)]
 enum Action {
     /// Create default.toml and isolated.toml; preserve existing files
@@ -44,11 +52,13 @@ enum Action {
     },
     /// Start an interactive $SHELL with user startup files disabled
     Shell {
+        // Appended after the shell's default startup flags without reinterpretation.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
     /// Run a program directly, preserving its arguments
     Exec {
+        // The first element is the executable; the rest are passed verbatim.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
     },
@@ -57,6 +67,7 @@ enum Action {
     Agent(Vec<OsString>),
 }
 
+/// Resolve one CLI request and return only for inspection, setup, or failure.
 fn run() -> Result<()> {
     let cli = Cli::parse();
     if cli.command.is_none() && !cli.print_policy {
@@ -67,6 +78,7 @@ fn run() -> Result<()> {
     if cli.print_policy && cli.command.is_some() {
         bail!("--print-policy cannot be combined with a command");
     }
+    // Resolve configuration once so init, check, and launch use the same lookup.
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME must be set")?);
     if !home.is_absolute() {
         bail!("HOME must be an absolute path");
@@ -84,6 +96,7 @@ fn run() -> Result<()> {
             None => home.join(".config/lilbox"),
         },
     };
+    // Setup and static analysis do not require a functioning sandbox backend.
     if matches!(cli.command, Some(Action::Init)) {
         let created = config::init(&config_directory)?;
         if created.is_empty() {
@@ -111,6 +124,8 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    // Resolve and validate everything needed for inspection before creating
+    // scratch storage or starting a process. Include inherited config protection.
     let profile_name = cli.profile.as_deref().unwrap_or("default");
     let loaded = config::load_resolved(&paths.config, profile_name)?;
     let policy = loaded.policy(&paths)?;
@@ -121,6 +136,8 @@ fn run() -> Result<()> {
         print!("{}", backend.render(&policy)?);
         return Ok(());
     }
+    // Shell selection uses the parent's SHELL; the child receives the separately
+    // sanitized environment. Explicit programs retain their original OS strings.
     let argv = match cli.command.context("missing command")? {
         Action::Exec { command } | Action::Agent(command) => command,
         Action::Shell { args } => {
@@ -148,6 +165,7 @@ fn run() -> Result<()> {
     launch::execute(backend.as_ref(), &policy, &argv, child_environment)
 }
 
+/// Format a terminal-safe summary without changing the arguments used for exec.
 fn startup_banner(profile: &str, argv: &[OsString], color: bool) -> String {
     // Quote complex arguments for display only. Execution retains the original
     // OsStrings, including non-UTF-8 bytes; Debug escapes terminal controls.
@@ -177,6 +195,7 @@ fn startup_banner(profile: &str, argv: &[OsString], color: bool) -> String {
     )
 }
 
+/// Flush the banner before exec replaces lilbox and discards its Rust buffers.
 fn print_startup(profile: &str, argv: &[OsString]) -> Result<()> {
     let mut stderr = std::io::stderr().lock();
     let color = stderr.is_terminal()
@@ -188,6 +207,7 @@ fn print_startup(profile: &str, argv: &[OsString]) -> Result<()> {
     stderr.flush().context("cannot flush startup display")
 }
 
+/// Print contextual failures and exit unsuccessfully; never retry unsandboxed.
 fn main() {
     if let Err(error) = run() {
         eprintln!("lilbox: {error:#}");
@@ -199,6 +219,7 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Keep display quoting readable without letting arguments inject terminal controls.
     #[test]
     fn startup_display_quotes_arguments_and_escapes_terminal_controls() {
         let argv =
@@ -213,6 +234,7 @@ mod tests {
         assert_eq!(banner.lines().count(), 3);
     }
 
+    /// Distinguish invalid UTF-8 bytes in the banner instead of replacing them lossily.
     #[cfg(unix)]
     #[test]
     fn startup_display_preserves_non_utf8_argument_distinctions() {
@@ -221,6 +243,7 @@ mod tests {
         assert!(startup_banner("default", &argv, false).contains(r#""a\xFF""#));
     }
 
+    /// Target flags and shell metacharacters must survive both command entry forms.
     #[test]
     fn arguments_after_program_are_opaque() {
         for prefix in [vec!["lilbox", "codex"], vec!["lilbox", "exec", "codex"]] {

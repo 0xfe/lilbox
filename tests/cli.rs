@@ -1,9 +1,14 @@
+//! Portable CLI and read-only diagnostics tests using disposable profile directories.
+//! Host enforcement is exercised separately by the explicitly ignored OS suites.
+
 use std::{fs, process::Command};
 
+/// Invoke Cargo's test binary, avoiding any installed lilbox found through PATH.
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_lilbox"))
 }
 
+/// Help/version must work without HOME, while exec still requires a target.
 #[test]
 fn help_version_and_missing_command() {
     let version = format!("lilbox {}", env!("CARGO_PKG_VERSION"));
@@ -24,6 +29,7 @@ fn help_version_and_missing_command() {
     assert!(!cli().arg("exec").output().unwrap().status.success());
 }
 
+/// Preserve user edits during init and reject invalid configuration before launch.
 #[test]
 fn initializes_without_overwriting_and_rejects_bad_profiles() {
     let root = tempfile::tempdir().unwrap();
@@ -49,6 +55,7 @@ fn initializes_without_overwriting_and_rejects_bad_profiles() {
     }
 }
 
+/// Unsupported platforms must fail before the requested executable produces output.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn unsupported_platform_never_launches_command() {
@@ -64,6 +71,7 @@ fn unsupported_platform_never_launches_command() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to run unsandboxed"));
 }
 
+/// Configure isolated launch paths without creating the home or config directory.
 fn check_fixture(root: &std::path::Path) -> Command {
     let mut c = cli();
     c.env_clear()
@@ -75,6 +83,7 @@ fn check_fixture(root: &std::path::Path) -> Command {
     c
 }
 
+/// Independent errors remain visible without exposing values or creating launch directories.
 #[test]
 fn check_aggregates_errors_without_leaking_assignments_or_writing_files() {
     let root = tempfile::tempdir().unwrap();
@@ -107,6 +116,7 @@ fn check_aggregates_errors_without_leaking_assignments_or_writing_files() {
     assert_eq!(fs::read_dir(config).unwrap().count(), 3);
 }
 
+/// Selecting one chain excludes unrelated failures; only strict mode fails on warnings.
 #[test]
 fn check_selected_chain_reports_conflicts_and_strict_exit_status() {
     let root = tempfile::tempdir().unwrap();
@@ -145,6 +155,7 @@ fn check_selected_chain_reports_conflicts_and_strict_exit_status() {
     );
 }
 
+/// Check the embedded fallback without creating files, then inspect installed examples.
 #[test]
 fn check_missing_directory_and_clean_examples() {
     let root = tempfile::tempdir().unwrap();
@@ -162,6 +173,7 @@ fn check_missing_directory_and_clean_examples() {
     assert!(text.contains("0 warning(s)"), "{text}");
 }
 
+/// Detect aliases of denied paths and unsafe scratch permissions without changing either.
 #[cfg(unix)]
 #[test]
 fn check_rejects_unsafe_scratch_and_finds_canonical_conflicts() {
@@ -194,6 +206,7 @@ fn check_rejects_unsafe_scratch_and_finds_canonical_conflicts() {
     );
 }
 
+/// Invalid inheritance prevents side effects, and diagnostic names cannot forge output.
 #[test]
 fn inherited_errors_prevent_execution_and_report_text_escapes_controls() {
     let root = tempfile::tempdir().unwrap();
@@ -225,6 +238,7 @@ fn inherited_errors_prevent_execution_and_report_text_escapes_controls() {
     assert!(text.contains("\\u{1b}"), "{text}");
 }
 
+/// All three entry points must reject capabilities the Linux backend cannot enforce.
 #[cfg(target_os = "linux")]
 #[test]
 fn unsupported_linux_policies_fail_in_check_preview_and_launch() {

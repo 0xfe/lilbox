@@ -14,12 +14,17 @@ import tempfile
 import threading
 import unittest
 
+# Locate real scripts to copy into temporary fixtures; never mutate this checkout.
 ROOT = Path(__file__).resolve().parent.parent
+# Fixed fake release version, independent of the current Cargo package version.
 VERSION = '0.3.0'
+# Populated by --binary for tests that exercise the real install/init behavior.
 REAL_BINARY = None
 
 
 class ScriptsTest(unittest.TestCase):
+    """Run the piped installer against local archives and stubbed download tools."""
+    # Create an isolated home, local assets, and fake platform/download commands.
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lilbox-release-test-')
         self.addCleanup(self.temp.cleanup)
@@ -58,14 +63,17 @@ else:
     destination.write_bytes(source.read_bytes())
 ''')
 
+    # Install a fixture executable at the front of this test's PATH.
     def tool(self, name, source):
         path = self.bin / name
         path.write_text(source)
         path.chmod(0o755)
 
+    # Run Python stubs with the same interpreter as the test harness.
     def python_tool(self, name, source):
         self.tool(name, f'#!{sys.executable}\n' + source)
 
+    # Build a tiny release archive/checksum, optionally containing invalid executable data.
     def archive(self, target='x86_64-unknown-linux-musl', binary_version=VERSION, symlink=False,
                 content=None, release_version=VERSION):
         name = f'lilbox-{release_version}-{target}'
@@ -94,24 +102,29 @@ esac
             hashlib.sha256(archive.read_bytes()).hexdigest() + f'  {archive.name}\n')
         return archive
 
+    # Feed the actual installer through stdin to reproduce curl-pipe-shell usage offline.
     def install(self, *args):
         return subprocess.run(['sh', '-s', '--', '--prefix', str(self.prefix), *args],
                               input=(ROOT / 'install.sh').read_bytes(), env=self.env,
                               capture_output=True, timeout=15)
 
+    # Require a nonzero exit and include stdout if the script unexpectedly succeeds.
     def assert_failed(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout)
 
+    # Package the supplied native binary using its actual embedded version.
     def real_archive(self):
         version = subprocess.check_output([REAL_BINARY, '--version'], text=True).strip().removeprefix('lilbox ')
         self.archive(content=REAL_BINARY.read_bytes(), release_version=version)
         return version
 
+    # Capture terminal stdout while keeping installer input piped and stderr separate.
     def terminal_install(self):
         # stdin stays a pipe, exactly as in curl | sh; only stdout is a terminal.
         master, slave = pty.openpty()
         chunks = []
 
+        # Drain the PTY concurrently so a full terminal buffer cannot stall installation.
         def read_output():
             while True:
                 try:
@@ -141,6 +154,7 @@ esac
         self.assertEqual(process.returncode, 0, errors)
         return b''.join(chunks)
 
+    # Verify each platform mapping and replacement install without latest-release discovery.
     def test_platforms_pinned_version_and_upgrade(self):
         for os_name, arch, target in [
             ('Darwin', 'arm64', 'aarch64-apple-darwin'),
@@ -162,6 +176,7 @@ esac
                 self.assertEqual((self.root / 'init.log').read_text().splitlines()[-1], str(binary))
                 self.assertNotIn(b'\x1b', result.stdout)
 
+    # Resolve a fake latest redirect and install under the disposable home by default.
     def test_latest_and_default_prefix(self):
         self.archive()
         result = subprocess.run(['sh', '-s'], input=(ROOT / 'install.sh').read_bytes(),
@@ -170,6 +185,7 @@ esac
         self.assertTrue((self.home / '.local/bin/lilbox').is_file())
         self.assertIn('/releases/latest', self.log.read_text())
 
+    # Progress must reflect ordering and never announce work skipped after a checksum failure.
     def test_progress_follows_work_and_stops_at_failed_verification(self):
         archive = self.archive()
         result = self.install()
@@ -191,6 +207,7 @@ esac
                       'Copying the executable', 'Initializing missing profiles', 'Installed and ready'):
             self.assertNotIn(stage.encode(), result.stdout)
 
+    # Every pre-replacement failure must keep the old binary and remove staging files.
     def test_failures_preserve_existing_binary_and_clean_up(self):
         destination = self.prefix / 'bin/lilbox'
         destination.parent.mkdir(parents=True)
@@ -213,6 +230,7 @@ esac
                 self.assertEqual(list(destination.parent.glob('.lilbox.*')), [])
                 self.assertFalse((self.root / 'init.log').exists())
 
+    # Reject invalid options and unsupported platforms before invoking the download stub.
     def test_bad_inputs_fail_before_download(self):
         for args in [('--prefix', 'relative'), ('--version', '../../escape'), ('--unknown',), ('--version',)]:
             with self.subTest(args=args):
@@ -224,6 +242,7 @@ esac
             self.env[key] = prior
         self.assertFalse(self.log.exists())
 
+    # Reject redirects outside the release repository and missing versioned assets.
     def test_invalid_latest_redirect_and_missing_asset(self):
         self.env['LATEST_URL'] = 'https://example.com/releases/tag/v0.3.0'
         self.assert_failed(self.install())
@@ -231,6 +250,7 @@ esac
         self.assert_failed(self.install('--version', VERSION))
         self.assertFalse((self.prefix / 'bin/lilbox').exists())
 
+    # Refuse a symlink destination without changing the file it points to.
     def test_existing_symlink_is_not_followed(self):
         self.archive()
         self.prefix.joinpath('bin').mkdir(parents=True)
@@ -240,6 +260,7 @@ esac
         self.assert_failed(self.install('--version', VERSION))
         self.assertEqual(original.read_text(), 'unchanged')
 
+    # Use real init to fill missing profiles while preserving user content, inodes, and times.
     def test_real_init_fresh_install_and_upgrade_preserve_custom_profiles(self):
         version = self.real_archive()
         # A pre-existing lilbox in PATH must never handle initialization.
@@ -267,6 +288,7 @@ esac
                          'lilbox check', 'lilbox shell', 'lilbox codex', 'export PATH=', '+-------+'):
             self.assertIn(expected, output)
 
+    # Respect XDG lookup and preserve both valid and dangling profile symlinks.
     def test_real_init_xdg_directory_and_existing_symlinks_are_preserved(self):
         version = self.real_archive()
         xdg = self.root / 'custom config'
@@ -287,6 +309,7 @@ esac
         self.assertFalse((self.home / '.config').exists())
         self.assertIn(str(config).encode(), result.stdout)
 
+    # An init failure leaves the installed binary but must report failure and a recovery command.
     def test_real_init_failure_reports_partial_install_and_recovery(self):
         version = self.real_archive()
         blocked = self.root / 'not-a-directory'
@@ -301,6 +324,7 @@ esac
         self.assertNotIn(b'Installed and ready', result.stdout)
         self.assertEqual(list((self.prefix / 'bin').glob('.lilbox.*')), [])
 
+    # Check terminal color output and both supported ways to disable it.
     def test_terminal_colors_and_opt_out(self):
         self.archive()
         self.assertIn('\x1b[1;36m→\x1b[0m Checking platform'.encode(), self.terminal_install())
@@ -311,6 +335,7 @@ esac
         self.env['TERM'] = 'dumb'
         self.assertNotIn(b'\x1b', self.terminal_install())
 
+    # Execute printed PATH guidance against tricky path characters to verify safe quoting.
     def test_path_guidance_is_shell_quoted_and_omitted_when_already_present(self):
         self.archive()
         self.prefix = self.root / "prefix ' with $spaces"
@@ -328,6 +353,7 @@ esac
 
 class InstallerUploadTest(unittest.TestCase):
     """Exercise publication with a fake gcloud; never read credentials or upload."""
+    # Copy the publisher and installer, replacing gcloud with local storage and call logging.
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lilbox-upload-test-')
         self.addCleanup(self.temp.cleanup)
@@ -365,10 +391,12 @@ else:
 ''')
         gcloud.chmod(0o755)
 
+    # Invoke the copied publisher from outside its checkout with the fake cloud environment.
     def upload(self, *args):
         return subprocess.run(['bash', str(self.script), *args], cwd=self.root, env=self.env,
                               capture_output=True, text=True, timeout=15)
 
+    # Publish only the staged installer with exact metadata, even if its source changes.
     def test_exact_object_metadata_snapshot_and_readback(self):
         original = self.source.read_bytes()
         self.env['EDIT_SOURCE'] = '1'
@@ -386,6 +414,7 @@ else:
         self.assertIn('Published https://mo.town/lilbox/install.sh', result.stdout)
         self.assertFalse(staged.parent.exists())
 
+    # Upload/readback failures must return nonzero, clean staging, and omit success text.
     def test_cloud_failures_and_readback_mismatch_never_report_success(self):
         for setting, value in [('FAIL_GCLOUD', 'cp'), ('FAIL_GCLOUD', 'cat'), ('CORRUPT_READBACK', '1')]:
             with self.subTest(setting=setting, value=value):
@@ -397,6 +426,7 @@ else:
                 self.assertEqual(list(self.root.glob('lilbox-installer-upload.*')), [])
         self.assertIn('does not match', result.stderr)
 
+    # Shell syntax validation must reject a broken installer before any cloud operation.
     def test_invalid_script_fails_before_cloud_access(self):
         self.source.write_text('#!/bin/sh\nif then\n')
         result = self.upload()
@@ -404,6 +434,7 @@ else:
         self.assertFalse(self.log.exists())
         self.assertEqual(list(self.root.glob('lilbox-installer-upload.*')), [])
 
+    # Help and argument validation must remain free of publication side effects.
     def test_help_and_bad_arguments_do_not_publish(self):
         result = self.upload('--help')
         self.assertEqual(result.returncode, 0)
@@ -414,6 +445,7 @@ else:
 
 class VersionFlowTest(unittest.TestCase):
     """Use real temporary Git repositories; only GitHub API/dispatch is stubbed."""
+    # Create real local Git history/remotes and stub only GitHub history and dispatch.
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lilbox-version-test-')
         self.addCleanup(self.temp.cleanup)
@@ -460,19 +492,23 @@ else:
 ''')
         gh.chmod(0o755)
 
+    # Run Git inside the fixture with global user configuration disabled.
     def git(self, *args):
         return subprocess.check_output(['git', *args], cwd=self.repo, env=self.env, stderr=subprocess.PIPE).decode().strip()
 
+    # Commit fixture changes so clean-tree checks exercise real Git state.
     def commit(self, message):
         self.git('add', '.')
         self.git('commit', '-m', message)
 
+    # Write minimal version files, including a dependency version that must not change.
     def metadata(self, version):
         (self.repo / 'Cargo.toml').write_text(f'[package]\nname = "lilbox"\nversion = "{version}"\n\n[dependencies]\nanyhow = "1"\n')
         (self.repo / 'Cargo.lock').write_text(f'version = 4\n\n[[package]]\nname = "dependency"\nversion = "0.3.0"\n\n[[package]]\nname = "lilbox"\nversion = "{version}"\ndependencies = ["dependency"]\n')
         (self.repo / 'README.md').write_text(f'Version **{version}** supports macOS and Linux.\ninstall.sh --version {version}\n\n  lilbox {version}\n')
         (self.repo / 'CHANGELOG.md').write_text(f'# Changelog\n\n## {version} — 2026-11-08\n\n- Previous notes.\n\n## 0.2.0 — 2026-10-01\n\n- Historical notes.\n')
 
+    # Call version preparation/checking or the release wrapper inside the fixture.
     def invoke(self, action, version=None):
         command = [sys.executable, str(self.repo / 'scripts/version.py'), action]
         if action == 'release':
@@ -481,14 +517,17 @@ else:
             command.append(version)
         return subprocess.run(command, cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=15)
 
+    # Capture exact metadata bytes to detect partial writes after rejected operations.
     def snapshot(self):
         return {name: (self.repo / name).read_bytes() for name in ('Cargo.toml', 'Cargo.lock', 'README.md', 'CHANGELOG.md')}
 
+    # Require rejection without metadata edits or a workflow dispatch.
     def assert_rejected(self, result, before):
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.log.exists())
 
+    # A default bump changes only intended metadata and leaves local/remote HEAD untouched.
     def test_default_patch_bump_updates_only_version_files_without_commit_or_push(self):
         head = self.git('rev-parse', 'HEAD')
         result = self.invoke('bump')
@@ -503,6 +542,7 @@ else:
         self.assertEqual(set(self.git('diff', '--name-only').splitlines()), set(self.snapshot()))
         self.assertFalse(self.log.exists())
 
+    # Promote handwritten unreleased notes under the requested canonical version heading.
     def test_explicit_version_normalizes_v_and_preserves_unreleased_notes(self):
         path = self.repo / 'CHANGELOG.md'
         path.write_text(path.read_text().replace('# Changelog\n', '# Changelog\n\n## Unreleased\n\n- Handwritten change.\n', 1))
@@ -514,12 +554,14 @@ else:
         self.assertIn('\n\n- Handwritten change.\n', notes)
         self.assertIn('## 0.4.0 — ', notes)
 
+    # Compare version components numerically across a multi-digit minor transition.
     def test_numeric_ordering_and_minor_rollover(self):
         self.metadata('0.9.9')
         self.commit('Prepare current version')
         result = self.invoke('bump', '0.10.0')
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    # Reject malformed or non-increasing versions without edits or shell interpretation.
     def test_invalid_equal_older_and_overflow_versions_leave_files_untouched(self):
         before = self.snapshot()
         for version in ('0.3.0', '0.2.9', '01.2.3', '1.02.3', '1.2.03', '1.2', '1.2.3.4',
@@ -529,6 +571,7 @@ else:
                 self.assert_rejected(self.invoke('bump', version), before)
         self.assertFalse((self.repo / 'BAD').exists())
 
+    # All tag forms and GitHub release history reserve versions against reuse.
     def test_local_remote_annotated_and_github_release_reservations(self):
         before = self.snapshot()
         self.git('tag', '0.3.1')
@@ -542,6 +585,7 @@ else:
         self.assert_rejected(self.invoke('bump', '0.4.1'), before)
         self.assert_rejected(self.invoke('bump', '0.5.0'), before)
 
+    # Unavailable history or user changes must stop preparation before metadata mutation.
     def test_remote_failures_and_dirty_tree_fail_before_writes(self):
         before = self.snapshot()
         self.env['HISTORY_FAIL'] = '1'
@@ -554,12 +598,14 @@ else:
         self.assert_rejected(self.invoke('bump'), before)
         self.assertEqual((self.repo / 'untracked').read_text(), 'user work')
 
+    # A stale README reference must abort the entire proposed version update.
     def test_inconsistent_metadata_fails_without_partial_bump(self):
         readme = self.repo / 'README.md'
         readme.write_text(readme.read_text().replace('Version **0.3.0**', 'Version **0.1.0**'))
         self.commit('Inconsistent docs fixture')
         self.assert_rejected(self.invoke('bump'), self.snapshot())
 
+    # Releasing the prepared version dispatches precisely the pushed HEAD and version.
     def test_release_current_dispatches_exact_commit_without_mutation(self):
         before = self.snapshot()
         result = self.invoke('release')
@@ -569,6 +615,7 @@ else:
         self.assertEqual(args, ['workflow', 'run', 'release.yml', '--repo', '0xfe/lilbox', '--ref', 'main',
                                 '-f', 'commit=' + self.git('rev-parse', 'HEAD'), '-f', 'version=0.3.0'])
 
+    # A newer version requires preparation, manual commit, and push before dispatch.
     def test_release_new_version_stops_for_manual_commit_and_push(self):
         result = self.invoke('release', 'v0.4.0')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -582,6 +629,7 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('version=0.4.0', self.log.read_text())
 
+    # Reject publication from the wrong branch or with a stale/reserved version.
     def test_release_rejects_feature_branch_older_versions_and_existing_releases(self):
         before = self.snapshot()
         self.assert_rejected(self.invoke('release', '0.2.9'), before)
@@ -591,6 +639,7 @@ else:
         self.env['RELEASE_TAGS'] = 'v0.3.0'
         self.assert_rejected(self.invoke('release'), before)
 
+    # Revalidate exact version text and fresh reservations at the workflow boundary.
     def test_workflow_check_rejects_noncanonical_mismatched_or_newly_reserved_versions(self):
         before = self.snapshot()
         result = self.invoke('check', '0.3.0')

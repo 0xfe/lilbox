@@ -1,3 +1,6 @@
+//! macOS Seatbelt policy rendering and sandbox-exec command construction.
+//! Explicit operation denies and ancestor protection preserve exclusions under grants.
+
 use super::{Backend, SandboxCommand};
 use crate::{
     config::{Mode, Network},
@@ -6,8 +9,10 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{collections::BTreeSet, fmt::Write, path::Path, process::Command};
 
+/// Stateless renderer for macOS's sandbox profile language (SBPL).
 pub struct Seatbelt;
 
+/// Encode a path as one SBPL string literal, never as executable policy text.
 fn quote(path: &Path) -> Result<String> {
     let value = path.to_str().context("Seatbelt paths must be UTF-8")?;
     if value.chars().any(char::is_control) {
@@ -19,6 +24,7 @@ fn quote(path: &Path) -> Result<String> {
     ))
 }
 
+/// Grant a subtree plus the ancestor metadata needed to traverse to that subtree.
 fn grant(output: &mut String, operations: &str, path: &Path) -> Result<()> {
     writeln!(output, "(allow {operations} (subpath {}))", quote(path)?)?;
     // Traversal/getcwd metadata is necessary for a granted directory, but does
@@ -34,6 +40,7 @@ fn grant(output: &mut String, operations: &str, path: &Path) -> Result<()> {
 }
 
 impl Backend for Seatbelt {
+    /// Combine the baseline, capabilities, grants, and overriding restrictions.
     fn render(&self, policy: &Policy) -> Result<String> {
         let mut output = String::from("(version 1)\n");
         output.push_str(match policy.mode {
@@ -93,6 +100,7 @@ impl Backend for Seatbelt {
         Ok(output)
     }
 
+    /// Supply SBPL as a single argument; the launch layer appends the target argv.
     fn command(&self, policy: &Policy) -> Result<SandboxCommand> {
         if !cfg!(target_os = "macos") {
             bail!("Seatbelt requires macOS");
@@ -109,6 +117,7 @@ impl Backend for Seatbelt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Treat quotes/backslashes as path data and reject control characters entirely.
     #[test]
     fn escaping_prevents_policy_injection() {
         assert_eq!(

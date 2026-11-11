@@ -1,3 +1,6 @@
+//! Shared configuration, policy, and launch machinery for the CLI and its tests.
+//! Backends translate resolved policy into OS enforcement; callers orchestrate it.
+
 pub mod backend;
 pub mod check;
 pub mod config;

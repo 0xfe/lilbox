@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Build a local target archive and checksum; tagging/publication happen elsewhere.
 set -euo pipefail
 CDPATH='' cd -- "$(dirname "$0")/.."
 
@@ -12,6 +13,7 @@ case "$target" in
     *) echo "Unsupported release target: $target" >&2; exit 1 ;;
 esac
 
+# Cargo.toml is authoritative; do not infer the release version from Git tags.
 package_id=$(cargo pkgid --offline)
 version=${package_id##*[#@]}
 name="lilbox-${version}-${target}"

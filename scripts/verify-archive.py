@@ -9,6 +9,7 @@ import tempfile
 
 
 def verify(archive):
+    """Check checksum/layout, then run the packaged CLI with disposable configs."""
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     assert Path(str(archive) + '.sha256').read_text() == f'{digest}  {archive.name}\n'
     name = archive.name.removesuffix('.tar.gz')
@@ -40,6 +41,8 @@ def verify(archive):
         for flag in ('-v', '-V', '--version'):
             result = subprocess.run([binary, flag], env={}, capture_output=True, check=True)
             assert result.stdout == f'lilbox {version}\n'.encode() and not result.stderr
+        # These are real sandbox launches and require a matching, permitted host.
+        # Isolate init and scratch creation from the developer's actual home.
         home, work, config = (root / part for part in ('home', 'work', 'config'))
         for path in (home, work, config):
             path.mkdir()

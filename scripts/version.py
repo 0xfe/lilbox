@@ -7,16 +7,21 @@ import re
 import subprocess
 import sys
 
+# Anchor subprocesses and metadata edits to this checkout, regardless of caller CWD.
 ROOT = Path(__file__).resolve().parent.parent
+# Stable SemVer only; component bounds are checked separately before integer use.
 VERSION_RE = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+# The complete write set for version preparation; used for validation and rollback.
 FILES = ('Cargo.toml', 'Cargo.lock', 'README.md', 'CHANGELOG.md')
 
 
 class ReleaseError(Exception):
+    """An actionable validation or command failure reported without a traceback."""
     pass
 
 
 def run(*args):
+    """Run argv directly in the checkout and surface captured command failures."""
     result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
     if result.returncode:
         raise ReleaseError(f"{' '.join(args[:2])} failed: {result.stderr.strip() or result.stdout.strip()}")
@@ -24,6 +29,7 @@ def run(*args):
 
 
 def version_tuple(value, allow_v=True):
+    """Validate stable syntax and Cargo's u64 bounds, returning sortable integers."""
     canonical = value[1:] if allow_v and value.startswith('v') else value
     if not re.fullmatch(VERSION_RE, canonical):
         raise ReleaseError('Use a stable X.Y.Z version with no leading zeros, prerelease suffix, or build metadata.')
@@ -37,10 +43,12 @@ def version_tuple(value, allow_v=True):
 
 
 def normalize(value):
+    """Remove an optional tag prefix and return canonical X.Y.Z text."""
     return '.'.join(map(str, version_tuple(value)))
 
 
 def table(text, header, name=None):
+    """Locate one literal TOML version and its offsets without reformatting the file."""
     pattern = r'(?ms)^' + re.escape(header) + r'\s*\n.*?(?=^\[|\Z)'
     matches = [match for match in re.finditer(pattern, text)
                if name is None or re.search(r'^name\s*=\s*"' + re.escape(name) + r'"\s*$', match[0], re.M)]
@@ -55,6 +63,7 @@ def table(text, header, name=None):
 
 
 def sources():
+    """Read the intended write set and require agreement between Cargo versions."""
     data = {}
     for name in FILES:
         path = ROOT / name
@@ -70,11 +79,13 @@ def sources():
 
 
 def clean_tree():
+    """Refuse preparation/publication while tracked or untracked user changes exist."""
     if run('git', 'status', '--porcelain'):
         raise ReleaseError('Commit or stash your changes first; version preparation requires a clean working tree.')
 
 
 def history():
+    """Collect local/remote tags and GitHub reservations, including draft releases."""
     # Fail closed if either remote tags or GitHub releases cannot be read.
     origin = run('git', 'remote', 'get-url', 'origin')
     repository = run('gh', 'repo', 'view', origin, '--json', 'nameWithOwner', '--jq', '.nameWithOwner')
@@ -102,6 +113,7 @@ def history():
 
 
 def available(version, reserved):
+    """Require a version above every known stable tag or release, not just HEAD's."""
     target = version_tuple(version)
     if reserved:
         latest = max(reserved, key=reserved.get)
@@ -110,6 +122,7 @@ def available(version, reserved):
 
 
 def readme_version(text, current, target):
+    """Replace each expected public version example exactly once or reject drift."""
     patterns = [r'(Version \*\*)' + re.escape(current) + r'(\*\*)',
                 r'(--version )' + re.escape(current) + r'(?=\s|$)',
                 r'(?m)^(  lilbox )' + re.escape(current) + r'$']
@@ -121,6 +134,7 @@ def readme_version(text, current, target):
 
 
 def release_notes(tags, repository, version):
+    """Draft notes from commits after the highest stable tag reachable from HEAD."""
     bases = []
     for name, sha in tags.items():
         try:
@@ -139,6 +153,7 @@ def release_notes(tags, repository, version):
 
 
 def bump(version, current, data, repository, tags):
+    """Prepare all version edits with rollback on write failure; never commit/push."""
     if version_tuple(version) <= version_tuple(current):
         raise ReleaseError(f'New version must be greater than the current version {current}.')
     updated = dict(data)
@@ -175,6 +190,7 @@ def bump(version, current, data, repository, tags):
 
 
 def check_sources(version, current, data):
+    """Require Cargo, README examples, and dated release notes to match the request."""
     if version != current:
         raise ReleaseError(f'Requested {version}, but Cargo.toml contains {current}.')
     readme_version(data['README.md'], current, current)
@@ -183,6 +199,7 @@ def check_sources(version, current, data):
 
 
 def main():
+    """Prepare a newer version, validate CI inputs, or dispatch the pushed version."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['bump', 'release', 'check'])
     parser.add_argument('version', nargs='?')
@@ -204,6 +221,8 @@ def main():
             raise ReleaseError(f'Version cannot be lower than current version {current}.')
         if args.action == 'bump' and version == current:
             raise ReleaseError(f'New version must be greater than current version {current}.')
+    # Recheck reservations for every action, including workflow validation: a tag
+    # or draft may have appeared since local preparation.
     repository, tags, reserved = history()
     available(version, reserved)
     if args.action == 'bump' or (args.action == 'release' and version != current):
@@ -213,6 +232,8 @@ def main():
     if args.action == 'check':
         print(f'Validated release {version}.')
         return
+    # Bind publication to the reviewed, pushed main commit rather than allowing
+    # the workflow to silently build a different revision.
     commit = run('git', 'rev-parse', 'HEAD')
     remote = run('git', 'ls-remote', '--exit-code', 'origin', 'refs/heads/main').split()[0]
     if commit != remote:
