@@ -3,8 +3,9 @@
 [Website](https://mo.town/lilbox/)
 
 A small wrapper for running coding agents and untrusted commands inside an OS
-sandbox. The default profile ensures that agents don't have access to sensitive
-files, such as: `~/.ssh`, `~/.aws` etc. and environment variables (like API keys.)
+sandbox. The default profile blocks common sensitive paths such as `~/.ssh` and
+`~/.aws`, and scrubs sensitive environment variables such as API keys. On Linux,
+only deny paths that exist at startup are protected.
 
 Think of it as an *outer sandbox* which serves as a defense in depth along with
 other isolation mechanisms, particularly those bundled with agent harnesses.
@@ -14,7 +15,7 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.3.1** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+Version **0.4.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
 through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
 refuse execution.
 
@@ -35,12 +36,14 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose an alternate installation prefix or a specific release:
 
 ```sh
-curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.3.1
+curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
 ```
 
 The installer reports download, checksum, copy, and initialization progress, then
-shows config paths and quick-start commands. It creates missing profiles without
-overwriting existing configs. Color follows terminal output and respects
+shows config paths and quick-start commands. It asks before replacing existing
+shipped profiles and the agent guide. Declining, or running without a terminal,
+writes versioned alternatives such as `default.toml.0.4.0`. Pass
+`--overwrite-profiles` to replace them explicitly. Color follows terminal output and respects
 `NO_COLOR` and `TERM=dumb`.
 
 Linux needs `/usr/bin/bwrap` (bubblewrap 0.6.3+), permitted user namespaces,
@@ -69,10 +72,10 @@ current directory remain writable, subject to the Linux restrictions below.
 To configure profiles:
 
 ```sh
-lilbox init                   # installer does this too; never overwrites existing files
+lilbox init                   # install missing profiles and AGENTS.md; preserve existing files
 lilbox -p isolated exec /bin/sh -c 'echo hello; ls'
 lilbox -p isolated shell
-lilbox --print-policy         # inspect the exact native policy
+lilbox policy         # inspect the exact native policy
 lilbox check                  # analyze all profiles and inheritance
 lilbox -p isolated check      # analyze one profile and its parents
 ```
@@ -93,16 +96,21 @@ lilbox [OPTIONS] <PROGRAM> [ARGS...]
 | `lilbox -v`, `-V`, `--version` | Print the embedded binary version. |
 | `lilbox shell` | Start an interactive shell without user startup files. |
 | `lilbox exec <PROGRAM> [ARGS...]` | Run a program, including names that overlap lilbox commands. |
-| `lilbox init` | Create missing starter profiles. |
+| `lilbox init` | Create missing starter profiles and the agent guide. |
+| `lilbox init --versioned` | Preserve existing files and write versioned alternatives. |
+| `lilbox init --overwrite-profiles` | Replace shipped regular files explicitly. |
 | `lilbox [-p NAME] check [--strict]` | Check all profiles, or one profile and its parents. |
-| `lilbox [-p NAME] --print-policy` | Inspect the resolved sandbox policy. |
+| `lilbox [-p NAME] policy` | Inspect the indented, colored native policy. |
+| `lilbox [-p NAME] profile check [--strict]` | Same checks as `lilbox check`. |
+| `lilbox [-p NAME] profile show [--all] [--origins]` | Explain effective access and inheritance. |
+| `lilbox [-p NAME] profile cani OPERATION [ARG]` | Ask what the policy permits without performing the operation. |
 
 The version from `Cargo.toml` is baked into the binary and appears in help and
 `-v` / `--version` output (`-V` also works). Before launching a command, lilbox
 prints a compact summary to stderr:
 
 ```text
-  lilbox 0.3.1
+  lilbox 0.4.0
   ├ profile  default
   └ command  cargo test
 ```
@@ -128,16 +136,25 @@ Profile lookup, in priority order:
 2. `$XDG_CONFIG_HOME/lilbox`
 3. `~/.config/lilbox`
 
-Each profile is a `NAME.toml` file. Only `default` has an embedded fallback.
+Each profile is a `NAME.toml` file. Both `default` and `permissive` have embedded
+fallbacks. The shipped `default.toml` inherits `permissive` and is the place for
+your personal overrides; existing standalone default profiles continue to work.
 
 | Starter | Filesystem | Network |
 | --- | --- | --- |
-| [`default`](profiles/default.toml) | Broad access, with credential/private-path denies. | Allowed |
+| [`permissive`](profiles/permissive.toml) | Broad access, with credential/private-path denies. | Allowed |
+| [`default`](profiles/default.toml) | Inherits permissive; add personal overrides here. | Inherited |
 | [`isolated`](profiles/isolated.toml) | System reads, current-directory writes, and scratch storage. | Denied |
 
-**Linux:** missing denied paths, such as an absent `.env`, can block new sibling
-files and atomic file replacement. Run `lilbox check` and review the
-[Linux filesystem restrictions](docs/profiles.md#missing-denied-paths).
+**Linux:** denied paths that do not exist at startup are ignored for that run.
+Their parents stay writable, and no placeholders are created. A console notice
+lists at most three ignored paths and the remaining count. A missing `.env` can
+therefore be created/read during that run if the surrounding directory is granted.
+Existing denies stay protected. See [Linux permissions](docs/profiles.md#missing-denied-paths).
+
+Tell your coding agent, outside the sandbox, to read `~/.config/lilbox/AGENTS.md`
+to learn how to customize lilbox. `init` installs this [guide](docs/LILBOX-AGENTS.md); startup and init report
+the actual path when you use XDG or `--config-dir` overrides.
 
 ### Customize a profile
 
@@ -194,3 +211,25 @@ See [check diagnostics](docs/design.md#static-configuration-analysis).
 | [Development and releases](docs/development.md) | Build commands, tests, `just bump [VERSION]`, `just release [VERSION]`, and packaging. |
 | [Example profiles](examples/README.md) | Standalone, inherited, offline, and online configurations. |
 | [Contributor instructions](AGENTS.md) | Repository conventions and security constraints. |
+
+### Explain access
+
+```sh
+lilbox profile show --origins       # sample lists and label inherited settings
+lilbox profile show --all --origins # expand every list
+lilbox profile cani read-path ~/.ssh/id_ed25519
+lilbox profile cani write-path ./output.txt
+lilbox profile cani execute-path /usr/bin/python3
+lilbox profile cani read-env ANTHROPIC_API_KEY
+lilbox profile cani network
+lilbox --color always policy       # auto (default), always, or never
+```
+
+`show` displays effective filesystem, environment, and runtime rules; assignment
+values remain hidden. `--origins` names the profile contributing each scalar/list
+item. `cani` returns 0 for allowed and 1 for denied/indeterminate; it is static
+policy analysis, not a host access or connectivity probe. Path writes mean content
+writes/ordinary creation, not renames or atomic replacement. Special runtime paths
+may be indeterminate; host permissions, file existence, and executable dependencies
+still matter. Environment queries test whether a name would be admitted if present.
+The old `--print-policy` flag has been replaced by `policy` in 0.4.0.

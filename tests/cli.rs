@@ -47,9 +47,9 @@ fn initializes_without_overwriting_and_rejects_bad_profiles() {
         "do not overwrite"
     );
     for args in [
-        vec!["--print-policy"],
-        vec!["-p", "../escape", "--print-policy"],
-        vec!["-p", "missing", "--print-policy"],
+        vec!["policy"],
+        vec!["-p", "../escape", "policy"],
+        vec!["-p", "missing", "policy"],
     ] {
         assert!(!run().args(args).output().unwrap().status.success());
     }
@@ -106,7 +106,7 @@ fn check_aggregates_errors_without_leaking_assignments_or_writing_files() {
         "environment.keep",
         "NODE_OPTIONS",
         "BAD=NAME",
-        "4 profile(s)",
+        "5 profile(s)",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -122,6 +122,7 @@ fn check_selected_chain_reports_conflicts_and_strict_exit_status() {
     let root = tempfile::tempdir().unwrap();
     let config = root.path().join("config");
     fs::create_dir(&config).unwrap();
+    fs::create_dir_all(root.path().join("home/.ssh")).unwrap();
     fs::write(config.join("unrelated.toml"), "broken").unwrap();
     fs::write(config.join("work.toml"), "version=1\nextends='default'\nmode='closed'\n[filesystem]\nallow_read=['~/.ssh']\n[environment]\nkeep=['OPENAI_*','NODE_OPTIONS']\ndrop=['OPENAI_API_KEY','HOME']\nset={OPENAI_API_KEY='DO_NOT_PRINT_SECRET',HOME='/fake'}\n[runtime]\nbasic=true").unwrap();
     let output = check_fixture(root.path())
@@ -162,13 +163,13 @@ fn check_missing_directory_and_clean_examples() {
     let output = check_fixture(root.path()).arg("check").output().unwrap();
     assert!(output.status.success());
     assert!(!root.path().join("config").exists());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("embedded default fallback"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("embedded fallback"));
     let config = root.path().join("config");
     lilbox::config::init(&config).unwrap();
     let output = check_fixture(root.path()).arg("check").output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("2 profile(s), 0 error(s)"), "{text}");
+    assert!(text.contains("3 profile(s), 0 error(s)"), "{text}");
     #[cfg(target_os = "macos")]
     assert!(text.contains("0 warning(s)"), "{text}");
 }
@@ -253,7 +254,7 @@ fn unsupported_linux_policies_fail_in_check_preview_and_launch() {
         fs::write(config.join("bad.toml"), source).unwrap();
         for args in [
             vec!["check"],
-            vec!["--print-policy"],
+            vec!["policy"],
             vec!["exec", "/bin/sh", "-c", "echo escaped > MUST_NOT_EXIST"],
         ] {
             let output = check_fixture(root.path())
@@ -265,4 +266,254 @@ fn unsupported_linux_policies_fail_in_check_preview_and_launch() {
         }
         assert!(!root.path().join("MUST_NOT_EXIST").exists());
     }
+}
+
+/// The new command replaces the flag and colors/indents only when requested.
+#[test]
+fn policy_command_and_profile_check_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let plain = check_fixture(root.path())
+        .args(["policy"])
+        .output()
+        .unwrap();
+    assert!(plain.status.success(), "{plain:?}");
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert!(text.lines().any(|line| line.starts_with("  ")), "{text}");
+    assert!(!text.contains('\x1b'));
+    let colored = check_fixture(root.path())
+        .args(["--color", "always", "policy"])
+        .output()
+        .unwrap();
+    assert!(colored.status.success());
+    assert!(colored.stdout.contains(&0x1b));
+    assert!(
+        !check_fixture(root.path())
+            .arg("--print-policy")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let a = check_fixture(root.path())
+        .args(["check", "--strict"])
+        .output()
+        .unwrap();
+    let b = check_fixture(root.path())
+        .args(["profile", "check", "--strict"])
+        .output()
+        .unwrap();
+    assert_eq!(a.stdout, b.stdout);
+    assert_eq!(a.status.code(), b.status.code());
+    let colored_check = check_fixture(root.path())
+        .args(["--color", "always", "profile", "check"])
+        .output()
+        .unwrap();
+    assert!(colored_check.stdout.contains(&0x1b));
+    assert!(!root.path().join("home").exists());
+}
+
+/// Summaries expose origins and abbreviate lists without exposing assignment values.
+#[test]
+fn profile_show_reports_item_origins_and_can_expand_lists() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::write(config.join("base.toml"), "version=1\nnetwork='deny'\n[environment]\nkeep=['A','B','C','D','E']\nset={FLAG='DO_NOT_PRINT_SECRET'}").unwrap();
+    fs::write(config.join("child.toml"), "version=1\nextends='base'\nnetwork='allow'\n[environment]\nkeep=['F']\nset={FLAG='CHILD_SECRET'}").unwrap();
+    let run = |extra: &[&str]| {
+        check_fixture(root.path())
+            .args(["-p", "child", "profile", "show", "--origins"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let short = run(&[]);
+    assert!(short.status.success(), "{short:?}");
+    let text = String::from_utf8(short.stdout).unwrap();
+    assert!(text.contains("Network: Allow  [child]"), "{text}");
+    assert!(text.contains("A  [base]"));
+    assert!(text.contains("FLAG  [child]"));
+    assert!(text.contains("3 more items"));
+    assert!(!text.contains("SECRET"));
+    let full = String::from_utf8(run(&["--all"]).stdout).unwrap();
+    assert!(full.contains("F  [child]"));
+    assert!(!full.contains("more items"));
+    assert!(!root.path().join("home").exists());
+}
+
+/// Permission queries follow deny precedence and environment normalization, without I/O.
+#[test]
+fn cani_explains_paths_environment_and_network_without_performing_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    let work = root.path().join("work");
+    fs::create_dir(&work).unwrap();
+    fs::write(work.join("secret"), "untouched").unwrap();
+    fs::write(config.join("work.toml"), "version=1\nmode='closed'\nnetwork='deny'\n[filesystem]\nallow_read=['${CWD}/work']\nallow_write=['${CWD}/work/secret']\ndeny=['${CWD}/work/secret']\n[runtime]\nbasic=true\n[environment]\nkeep=['EXAMPLE_*', 'NODE_OPTIONS']\ndrop=['EXAMPLE_SECRET','HOME']\nset={FLAG='DO_NOT_PRINT_SECRET'}").unwrap();
+    for (operation, argument, allowed, reason) in [
+        ("read-path", Some("work/future"), true, "covered by grant"),
+        (
+            "write-path",
+            Some("work/future"),
+            false,
+            "no matching grant",
+        ),
+        ("read-path", Some("work/secret"), false, "denied by"),
+        ("write-path", Some("work/secret"), false, "denied by"),
+        ("execute-path", Some("work/tool"), true, "covered by grant"),
+        ("read-env", Some("EXAMPLE_OK"), true, "environment.keep"),
+        (
+            "read-env",
+            Some("EXAMPLE_SECRET"),
+            false,
+            "environment.drop",
+        ),
+        ("read-env", Some("NODE_OPTIONS"), false, "injection"),
+        ("read-env", Some("HOME"), true, "normalization"),
+        ("read-env", Some("FLAG"), true, "value hidden"),
+        ("network", None, false, "network = Deny"),
+    ] {
+        let mut cmd = check_fixture(root.path());
+        cmd.args(["-p", "work", "profile", "cani", operation]);
+        if let Some(arg) = argument {
+            cmd.arg(arg);
+        }
+        let result = cmd.output().unwrap();
+        assert_eq!(
+            result.status.success(),
+            allowed,
+            "{operation} {argument:?}: {result:?}"
+        );
+        let text = String::from_utf8(result.stdout).unwrap();
+        assert!(text.contains(reason), "{text}");
+        assert!(!text.contains("DO_NOT_PRINT_SECRET"));
+    }
+    assert!(!work.join("future").exists());
+    assert_eq!(
+        fs::read_to_string(work.join("secret")).unwrap(),
+        "untouched"
+    );
+    assert!(!root.path().join("home").exists());
+}
+
+/// Init installs the guide and honors preserve/versioned/overwrite choices.
+#[test]
+fn init_installs_agent_guide_and_versioned_alternatives() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let first = check_fixture(root.path()).arg("init").output().unwrap();
+    assert!(first.status.success());
+    assert!(String::from_utf8_lossy(&first.stdout).contains("Tell your coding agent to read"));
+    assert_eq!(
+        fs::read_to_string(config.join("AGENTS.md")).unwrap(),
+        lilbox::config::AGENT_GUIDE
+    );
+    assert_eq!(
+        fs::read_to_string(config.join("default.toml")).unwrap(),
+        lilbox::config::DEFAULT_PROFILE
+    );
+    assert_eq!(
+        lilbox::config::load_resolved(&config, "default")
+            .unwrap()
+            .chain,
+        ["permissive", "default"]
+    );
+    fs::write(config.join("default.toml"), "custom").unwrap();
+    assert!(
+        check_fixture(root.path())
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(config.join("default.toml")).unwrap(),
+        "custom"
+    );
+    assert!(
+        check_fixture(root.path())
+            .args(["init", "--versioned"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let alternative = config.join(format!("default.toml.{}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(
+        fs::read_to_string(&alternative).unwrap(),
+        lilbox::config::DEFAULT_PROFILE
+    );
+    fs::write(&alternative, "reviewed alternate").unwrap();
+    assert!(
+        check_fixture(root.path())
+            .args(["init", "--versioned"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(&alternative).unwrap(),
+        "reviewed alternate"
+    );
+    assert!(
+        check_fixture(root.path())
+            .args(["init", "--overwrite-profiles"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(config.join("default.toml")).unwrap(),
+        lilbox::config::DEFAULT_PROFILE
+    );
+}
+
+/// Explicit replacement must not follow symlinks to unrelated files.
+#[cfg(unix)]
+#[test]
+fn overwrite_profiles_refuses_symlink_targets() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    let original = root.path().join("original");
+    fs::write(&original, "unchanged").unwrap();
+    std::os::unix::fs::symlink(&original, config.join("permissive.toml")).unwrap();
+    let result = check_fixture(root.path())
+        .args(["init", "--overwrite-profiles"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("non-regular file"));
+    assert_eq!(fs::read_to_string(&original).unwrap(), "unchanged");
+    assert!(config.join("permissive.toml").is_symlink());
+}
+
+/// Scratch is created at launch, so static queries must include its future write grant.
+#[test]
+fn cani_accounts_for_scratch_creation_without_creating_it() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::write(
+        config.join("scratch.toml"),
+        "version=1\nmode='closed'\n[runtime]\nbasic=true\ntemporary_directory=true",
+    )
+    .unwrap();
+    let result = check_fixture(root.path())
+        .args([
+            "-p",
+            "scratch",
+            "profile",
+            "cani",
+            "write-path",
+            "~/.cache/lilbox/tmp/future",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert!(!root.path().join("home").exists());
 }

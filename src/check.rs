@@ -7,7 +7,7 @@ use crate::{
     policy::{ContextPaths, Policy, resolve_path},
 };
 use anyhow::{Context, Result};
-use std::{collections::BTreeSet, fs, io::IsTerminal, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 /// Diagnostic level; warnings affect the exit status only in strict mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,11 +63,8 @@ impl Report {
         self.count(Severity::Error) > 0 || (strict && self.count(Severity::Warning) > 0)
     }
 
-    /// Print escaped diagnostics with color only when stdout supports it.
-    pub fn print(&self) {
-        let color = std::io::stdout().is_terminal()
-            && std::env::var_os("NO_COLOR").is_none()
-            && std::env::var_os("TERM").is_none_or(|t| t != "dumb");
+    /// Print escaped diagnostics using the CLI's terminal-aware color preference.
+    pub fn print(&self, color: bool) {
         println!("Configuration check (static analysis; no sandbox launched)");
         for finding in &self.findings {
             let (glyph, label, code) = match finding.severity {
@@ -118,7 +115,7 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
         names.insert(name.to_owned());
     } else {
         // Include the embedded fallback even when no configuration directory exists.
-        names.insert("default".to_owned());
+        names.extend(["default".to_owned(), "permissive".to_owned()]);
         match fs::read_dir(&paths.config) {
             Ok(entries) => {
                 for entry in entries {
@@ -160,7 +157,7 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
         );
         for source in &loaded.sources {
             let embedded = if !source.exists() {
-                " (embedded default fallback)"
+                " (embedded fallback)"
             } else {
                 ""
             };
@@ -268,11 +265,12 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
                     format!("sandbox launcher {launcher} is missing"),
                 );
             }
-            #[cfg(target_os = "linux")]
-            if let Ok(parents) = backend::bubblewrap::restricted_parents(&policy) {
-                for parent in parents {
-                    report.add(Severity::Warning, &name, format!("bubblewrap: absent denied paths require read-only directory entries in {}; existing allowed children retain access, but new siblings and atomic replacement are blocked", parent.display()));
-                }
+            if !policy.ignored_denies.is_empty() {
+                report.add(
+                    Severity::Warning,
+                    &name,
+                    crate::display::ignored_denies(&policy),
+                );
             }
         }
     }

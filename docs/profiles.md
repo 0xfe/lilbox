@@ -1,7 +1,7 @@
 # Sandbox profiles and effective permissions
 
-This reference describes the shipped [default](../profiles/default.toml) and
-[isolated](../profiles/isolated.toml) profiles, including rules added by Rust code.
+This reference describes the shipped [permissive](../profiles/permissive.toml),
+[default](../profiles/default.toml), and [isolated](../profiles/isolated.toml) profiles, including rules added by Rust code.
 It must be updated whenever configuration, filesystem rules, environment filters,
 network/trust handling, runtime capabilities, or launch behavior change.
 
@@ -16,25 +16,30 @@ from these examples; Seatbelt-specific operations below apply only to macOS.
 lilbox init                       # create missing example files
 lilbox codex                      # default profile
 lilbox -p isolated shell
-lilbox --print-policy
-lilbox -p isolated --print-policy
+lilbox policy
+lilbox -p isolated policy
 ```
 
 Resolution order is `--config-dir DIR`, then `$XDG_CONFIG_HOME/lilbox`, then
-`~/.config/lilbox`. A profile named `NAME` uses `NAME.toml`. Only a missing `default`
-has a built-in fallback; `isolated` requires its file, usually created by `init`.
-Profiles are standalone unless they declare `extends = "NAME"`. See the
-inheritance rules below; both shipped profiles remain standalone.
+`~/.config/lilbox`. A profile named `NAME` uses `NAME.toml`. Missing `default` and
+`permissive` profiles have embedded fallbacks; `isolated` requires its file.
+The shipped default inherits permissive. Other profiles are standalone unless
+they declare `extends = "NAME"`. Existing standalone default files remain valid.
 
 Before a launch, lilbox displays its embedded version, selected profile name, and
 command (including shell startup flags) on stderr. Arguments are quoted and
 control characters escaped for display; the original arguments are passed directly
 to the command. The summary is colored on terminals unless `NO_COLOR` is set or
-`TERM=dumb`. Help, version, `init`, `check`, and `--print-policy` omit this summary.
+`TERM=dumb`. Help, version, `init`, `check`, and `policy` omit this summary.
 
-`init` preserves existing files. Installing a new lilbox does not rewrite user
-TOML, but changes to shared policy code still affect existing profiles.
-`--print-policy` shows resolved Seatbelt rules or quoted bubblewrap arguments
+`init` preserves existing files unless `--overwrite-profiles` is explicit.
+`init --versioned` writes alternatives such as `default.toml.0.4.0`. The installer
+asks before replacing shipped profiles and AGENTS.md; declining or no terminal
+selects versioned alternatives. Those alternatives are inactive until renamed.
+Shared policy code changes still affect existing profiles. Init and launches print
+the path of the installed agent customization guide.
+`lilbox policy` replaces the old flag and shows indented, colored Seatbelt rules or
+quoted bubblewrap arguments
 with descriptor placeholders and a syscall-filter summary for the current
 home/CWD. It neither launches a process nor prints the child environment or asks
 the kernel to enforce the policy.
@@ -68,26 +73,26 @@ links and cooperating unsandboxed filesystem changes are outside the boundary.
 
 ### Missing denied paths
 
-**A missing deny makes its nearest existing writable parent read-only.** Existing
-allowed children are rebound with their original access, but changing the
-parent's directory entries is blocked.
+**Linux ignores denied paths that are absent at startup.** The effective deny set
+is snapshotted after path expansion and inheritance/configuration protection.
+No host placeholders are created and no parent becomes read-only merely because a
+denied name is absent. Existing denies still override grants and pin exposed
+ancestors against renaming.
 
-| Operation in that parent | Result |
-| --- | --- |
-| Create a new child, including the denied name | Blocked |
-| Delete or rename a direct child | Blocked |
-| Atomically replace a direct child | Blocked |
-| Edit an existing allowed file in place | Allowed |
-| Create files inside an existing allowed subdirectory | Allowed, subject to other denies |
+A launch (and policy/profile inspection) prints an ignored-path notice showing at
+most three paths, followed by `and N other files` when needed. `profile check`
+reports ignored denies as warnings; `--strict` fails on these warnings.
+`profile show --all` expands the complete ignored set.
 
-For example, an absent workspace `.env` restricts directory entry changes at the
-workspace root. `lilbox check` warns for each affected parent; `--strict` fails on
-these warnings.
+For example, if `${CWD}/.env` is missing, the sandbox may create and read `.env`
+when CWD is writable. If `.env` exists at the next launch, it is then denied.
+The same applies outside CWD: an absent `~/.aws` does not freeze home directory
+entries. A name created later in the run has no deny protection from its ignored
+rule, though other active denies and the closed baseline still apply.
 
-- No host placeholder files or directories are created.
-- This is more restrictive than Seatbelt's handling of future paths.
-- For a different boundary, use a custom profile with credential protection
-  disabled and a reviewed deny list. Configuration protection remains mandatory.
+This applies to missing explicit, credential, and configuration deny paths.
+Dangling symlinks or other resolution errors still fail validation rather than
+being treated as ordinary absent paths. macOS continues to deny future paths.
 
 ### Linux runtime isolation
 
@@ -138,7 +143,7 @@ for the cross-platform boundary.
 | Extra descriptors | Only backend-owned filter/mask descriptors survive lilbox cleanup; bubblewrap consumes them before target execution. |
 | Process lifecycle | Bubblewrap supervises the PID namespace and preserves exit codes; signal deaths return `128 + signal`. |
 | Shell fallback | `/bin/sh` when `SHELL` is unset. |
-| `--print-policy` | Quoted arguments and a syscall-filter summary. Descriptor placeholders make this an inspection format, not a standalone shell command. |
+| `policy` | Quoted arguments and a syscall-filter summary. Descriptor placeholders make this an inspection format, not a standalone shell command. |
 
 Linux uses bubblewrap's `--new-session` so interactive shells do not try to
 restore a host process group that is invisible inside the private PID namespace.
@@ -166,9 +171,13 @@ services or sysctl policy.
 | Scratch | `~/.cache/lilbox/tmp`, read/write. | Same. |
 | Agent state/authentication | Files such as `~/.codex` and `~/.claude` are not on the built-in deny list. | Available only if covered by a grant, with denies still taking precedence. |
 
-## `default`: permissive filesystem and networking
+## `permissive` and `default`: open filesystem and networking
 
-The shipped profile has `mode = "open"`, `network = "allow"`,
+`default.toml` contains `version = 1` and `extends = "permissive"`. Add personal
+overrides there; `permissive.toml` holds the reusable open baseline. The following
+settings describe permissive and the resulting unmodified default.
+
+The permissive profile has `mode = "open"`, `network = "allow"`,
 `filesystem.protect_credentials = true`, `environment.inherit = true`, and
 `runtime.temporary_directory = true`. Its additional `deny`, `keep`, and `drop`
 lists are empty; `runtime.basic` is omitted and defaults to false.
@@ -316,7 +325,8 @@ deny list. In open mode, copies of credentials outside these paths may remain
 readable. In closed mode, accessibility additionally depends on grants.
 
 The selected lilbox config directory and every file in the inheritance chain
-(including each canonical symlink target) are always denied, even with `protect_credentials = false`.
+(including each canonical symlink target) are denied, even with `protect_credentials = false`.
+On Linux, absent paths are omitted from this set at startup as described above.
 Ancestors of denied paths cannot be unlinked/renamed by the sandboxed process.
 
 When credential protection is enabled **and** networking is denied, the renderer
@@ -409,7 +419,7 @@ accessible under the chosen profile.
 ## Custom profiles and omitted fields
 
 These schema defaults apply only when a field is omitted throughout the entire
-inheritance chain. A standalone profile does not copy either shipped TOML file:
+inheritance chain. A standalone profile does not copy any shipped TOML file:
 
 | Field | Default |
 | --- | --- |
@@ -428,8 +438,9 @@ filesystem, network, or basic-runtime capabilities. It cannot start an ordinary 
 
 Path entries support `~`, `${HOME}`, `${CWD}`, absolute paths, and CWD-relative
 paths. There are no globs, general variable expansion, or `..` components. Grant
-and deny aliases are resolved before launch; missing future descendants are
-supported, but dangling symlinks and other resolution failures are errors.
+and deny aliases are resolved before launch; missing future descendants can be
+resolved, but Linux omits missing denies from enforcement. Dangling symlinks and
+other resolution failures are errors.
 
 Adding an allow entry never cancels an explicit deny. To intentionally replace the
 built-in deny list, disable `protect_credentials` and supply your own restrictions.
@@ -454,7 +465,7 @@ keep = ["OPENAI_API_KEY"]
 Its filesystem, certificate services, network, environment filtering, and scratch
 rules are the effective `default` rules plus the extra path deny and authentication
 opt-in. It can still read/write ordinary files outside the workspace. Parent names
-resolve in the selected config directory; only `default` has an embedded fallback.
+resolve in the selected config directory; both `default` and `permissive` have embedded fallbacks.
 `isolated` must first be installed with `lilbox init` or provided locally.
 
 | Setting type | Inheritance behavior |
@@ -481,13 +492,14 @@ that were never explicitly set are determined by the final mode.
 
 All relative paths and `${CWD}` entries, including those from ancestors, resolve
 against the launch CWD. The entire config directory and all contributing profile
-files (lexical and canonical paths) are denied regardless of credential protection.
+files (lexical and canonical paths) are denied regardless of credential protection,
+subject to Linux omission of absent paths at startup.
 This includes parents symlinked into a separate dotfiles checkout. Ancestor rename
 protection applies to these targets too. Resolution remains a launch-time snapshot.
 
 Invalid names, missing parents, invalid TOML/types/versions, cycles by name or
 canonical file target, and excessive depth prevent launching. `lilbox check`
-inspects every local TOML file plus default; `lilbox -p work check` checks only the
+inspects every local TOML file plus default and permissive; `lilbox -p work check` checks only the
 selected chain. Missing `isolated` is not an error unless selected or inherited.
 A malformed dependency stops analysis of that effective profile, but other profiles
 are still checked. Scalar/key overrides are intentional, not conflicts.
@@ -521,3 +533,26 @@ how to try or install them with their dependencies:
 
 These examples are included in release archives but are not installed by `init`.
 All retain credential protection; see the gallery for their effective boundaries.
+
+## Human-readable inspection and permission queries
+
+`lilbox profile show` groups effective access into filesystem, environment, and
+runtime sections. Lists show three entries and a remainder count; `--all` expands
+them. `--origins` labels scalar overrides and the original contributing profile for
+each list item, including embedded fallbacks, schema defaults, and built-in rules.
+Merged raw source documents retain that provenance. Assignment names are shown,
+but values are always hidden. Both lexical and canonical path aliases can appear.
+
+`lilbox profile cani read-path PATH`, `write-path PATH`, and `execute-path PATH`
+resolve the requested path exactly like a profile rule and check active denies
+before grants/baselines. `read-env NAME` uses the actual environment construction
+rules with a hypothetical parent variable; keep does not synthesize a real value.
+`network` tests the global allow/deny setting and accepts no endpoint argument.
+
+Answers are static: ALLOW returns 0, DENY/INDETERMINATE returns 1, malformed CLI
+arguments return 2. No queried operation is executed. Host permissions and file
+existence may still prevent access. Execution requires accessible dependencies.
+Write queries concern data writes/ordinary creation, not rename/unlink, atomic
+replacement, or metadata operations. Native special-device/runtime rules can
+return INDETERMINATE. Use `policy` for complete native rules. Color is automatic
+on terminals; `--color always|never` overrides it for these inspection commands.

@@ -15,7 +15,7 @@ paths denied and sensitive environment variables removed.
 | Layer | Default behavior | Limit |
 | --- | --- | --- |
 | Credential files | Denies common SSH/cloud credentials, password stores, browser data, history, `~/Private`, and launch-directory `.env` files. | Fixed paths; no recursive secret scan. |
-| Configuration | Denies the lilbox config directory and all inherited profile files, including symlink targets. | Always active, even with credential protection disabled. |
+| Configuration | Denies the lilbox config directory and all inherited profile files, including symlink targets. | Independent of credential protection; Linux omits paths absent at startup. |
 | Environment | Removes common API keys, tokens, passwords, cloud credentials, SSH/GPG agent pointers, and database URLs. | Name-based matching cannot identify every secret. |
 | Injection hooks | Removes loader, interpreter, and shell injection variables. | `keep` cannot restore them; `set` rejects them. |
 | Process setup | Closes extra inherited descriptors, sets umask 077, and disables core dumps. | Standard input/output/error remain inherited. |
@@ -25,7 +25,7 @@ The exact inventories are in the profile reference:
 - [Denied filesystem paths](profiles.md#shared-filesystem-restrictions)
 - [Sensitive and injection variables](profiles.md#environment-rules)
 - [Linux mount restrictions](profiles.md#linux-bubblewrap-permissions), including
-  restrictions caused by missing deny paths
+  startup omission of missing deny paths
 
 Use `filesystem.deny` and `environment.drop` for private paths or variables outside
 the built-in lists. Removing a variable does not block access to its underlying
@@ -113,6 +113,7 @@ and lilbox is not an independently audited security boundary.
 
 | Outside the protection boundary | Consequence |
 | --- | --- |
+| Linux deny paths absent at startup | Ignored for that run; later creation/access may be allowed by the remaining policy. |
 | Secrets at unlisted paths, copies, and pre-existing hard links | They may remain readable under an allowed path. |
 | Allowed services and process/IPC operations | File restrictions do not prevent every indirect route to data. |
 | Inherited stdin/stdout/stderr | They can expose data or an existing network capability. |
@@ -120,7 +121,7 @@ and lilbox is not an independently audited security boundary.
 | A hostile parent environment | lilbox starts before it can scrub the child's environment. |
 | Cooperating unsandboxed filesystem changes | Path resolution is a launch-time snapshot. |
 
-Review narrow grants with `lilbox check` and `--print-policy`. See the
+Review narrow grants with `lilbox check` and `policy`. See the
 [profile reference](profiles.md) for effective permissions and the
 [design](design.md) for enforcement details.
 

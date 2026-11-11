@@ -28,6 +28,7 @@ main() {
     # All release discovery and asset downloads must stay under this repository.
     repository=https://github.com/0xfe/lilbox
     version=
+    overwrite_profiles=false
     prefix=${HOME:?HOME must be set}/.local
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -38,10 +39,12 @@ main() {
                     --version) version=${2#v} ;;
                 esac
                 shift 2 ;;
+            --overwrite-profiles) overwrite_profiles=true; shift ;;
             -h|--help)
-                echo 'Usage: sh install.sh [--prefix /absolute/path] [--version X.Y.Z]'
+                echo 'Usage: sh install.sh [--prefix /absolute/path] [--version X.Y.Z] [--overwrite-profiles]'
                 echo 'Installs PREFIX/bin/lilbox (default: ~/.local/bin), using the latest stable release.'
-                echo 'Creates missing starter profiles with lilbox init; existing configs are preserved.'
+                echo 'Installs starter profiles and AGENTS.md; asks before overwriting existing files.'
+                echo 'Declining (or no terminal) writes versioned alternatives. --overwrite-profiles replaces them.'
                 return ;;
             *) echo "Unknown option: $1" >&2; exit 1 ;;
         esac
@@ -85,6 +88,14 @@ main() {
     printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
         echo 'Version must be a stable release such as 0.3.0.' >&2; exit 1;
     }
+    # Older pinned binaries do not understand the new init modes. Keep their
+    # original no-clobber init behavior, and reject an unsupported overwrite opt-in.
+    legacy_init=false
+    case "$version" in 0.[0-3].*) legacy_init=true ;; esac
+    if [ "$legacy_init" = true ] && [ "$overwrite_profiles" = true ]; then
+        echo '--overwrite-profiles requires lilbox 0.4.0 or newer.' >&2
+        exit 1
+    fi
     log_step "Preparing lilbox $version"
     name=lilbox-$version-$target
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/lilbox-install.XXXXXXXX")
@@ -135,16 +146,48 @@ main() {
     log_step "Installing $destination"
     mv -f "$pending" "$destination"
     pending=
+    # The script itself arrives on stdin in curl | sh. Ask through the controlling
+    # terminal instead; without one, preserve files and write versioned alternatives.
+    config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
+    init_option=--versioned
+    profile_action='existing files preserved; versioned alternatives written when needed'
+    existing=false
+    for profile_file in default.toml permissive.toml isolated.toml AGENTS.md; do
+        if [ -e "$config_directory/$profile_file" ] || [ -L "$config_directory/$profile_file" ]; then
+            existing=true
+        fi
+    done
+    installed_files='default.toml, permissive.toml, isolated.toml, AGENTS.md'
+    if [ "$legacy_init" = true ]; then
+        init_option=
+        installed_files='default.toml and isolated.toml (legacy release)'
+        profile_action='existing files preserved by legacy init'
+    elif [ "$overwrite_profiles" = true ]; then
+        init_option=--overwrite-profiles
+    elif [ "$existing" = true ] && ( : <> /dev/tty ) 2>/dev/null; then
+        printf 'Replace existing shipped profiles and AGENTS.md in %s? [y/N] ' "$config_directory" > /dev/tty
+        if IFS= read -r reply < /dev/tty; then
+            case "$reply" in y|Y|yes|YES) init_option=--overwrite-profiles ;; esac
+        fi
+    fi
+    if [ "$init_option" = --overwrite-profiles ]; then
+        profile_action='shipped profiles and guide replaced; custom named profiles preserved'
+    fi
     # Invoke this exact executable, even if another lilbox is already on PATH.
-    log_step 'Initializing missing profiles (existing configs are preserved)'
-    if ! "$destination" init; then
+    set -- init
+    if [ -n "$init_option" ]; then
+        set -- "$@" "$init_option"
+        log_step 'Initializing profiles and agent guide'
+    else
+        log_step 'Initializing profiles (legacy release)'
+    fi
+    if ! "$destination" "$@"; then
         printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
         printf 'Fix the error above, then retry: ' >&2
         shell_quote "$destination" >&2
-        printf ' init\n' >&2
+        printf ' init %s\n' "$init_option" >&2
         exit 1
     fi
-    config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
     printf '\n%s' "$accent"
     printf '       +-------+\n'
     printf '      /       /|\n'
@@ -154,7 +197,8 @@ main() {
     printf '     +-------+%s\n\n' "$reset"
     printf '  Executable  %s\n' "$destination"
     printf '  Configs     %s\n' "$config_directory"
-    printf '              default.toml and isolated.toml; existing files preserved.\n\n'
+    printf '              %s\n' "$installed_files"
+    printf '              %s.\n\n' "$profile_action"
     case ":${PATH:-}:" in
         *":$prefix/bin:"*) ;;
         *) printf '%sAdd to PATH%s (run now; add to your shell startup file to keep it):\n  export PATH=' "$bold" "$reset"

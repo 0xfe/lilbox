@@ -273,7 +273,7 @@ mod tests {
     /// The open profile must still remove secrets, startup hooks, and implicit CWD lookup.
     #[test]
     fn scrubs_credentials_injection_and_unsafe_path_entries() {
-        let p = crate::config::parse(crate::config::DEFAULT_PROFILE).unwrap();
+        let p = crate::config::parse(crate::config::PERMISSIVE_PROFILE).unwrap();
         let result = build(&p, &paths(), source()).unwrap();
         assert_eq!(result[OsStr::new("PATH")], "/bin:/usr/bin");
         assert_eq!(result[OsStr::new("TERM")], "xterm");
@@ -339,7 +339,7 @@ mod tests {
         .into_iter()
         .map(|(key, value)| (key.into(), value.into()))
         .collect();
-        let profile = crate::config::parse(crate::config::DEFAULT_PROFILE).unwrap();
+        let profile = crate::config::parse(crate::config::PERMISSIVE_PROFILE).unwrap();
         let result = build(&profile, &paths(), source.clone()).unwrap();
         for (key, value) in &source {
             assert_eq!(result.get(key), Some(value), "{key:?}");

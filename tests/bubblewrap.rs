@@ -174,43 +174,65 @@ fn closed_grants_persist_writes_and_do_not_expose_ungranted_home() {
     denied(f.run("isolated", &["/bin/sh", "-c", "mkdir /ungranted"]));
 }
 
-/// Missing denies freeze parent entries but retain writes to existing allowed children.
+/// Missing denies must not freeze parents, and the notice must list at most three.
 #[test]
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
-fn future_denies_reserve_names_without_host_side_effects() {
+fn missing_denies_are_ignored_without_restricting_parent_entries() {
     let f = Fixture::new();
-    f.profile(
-        "future",
-        "version=1\nextends='default'\n[filesystem]\ndeny=['${CWD}/future/key']",
+    f.profile("future", "version=1\n[filesystem]\nprotect_credentials=false\ndeny=['${CWD}/a', '${CWD}/b', '${CWD}/c', '${CWD}/d', '${CWD}/e', '${CWD}/f', '${CWD}/g']");
+    let report = succeeds(
+        f.command("future")
+            .args(["profile", "check"])
+            .output()
+            .unwrap(),
     );
-    let before: Vec<_> = fs::read_dir(&f.work)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    let report = succeeds(f.command("future").arg("check").output().unwrap());
-    assert!(report.contains("read-only directory entries"));
-    succeeds(f.run(
+    assert!(report.contains("Ignored absent deny paths:"));
+    assert!(!report.contains("read-only directory entries"));
+    let output = f.run(
         "future",
         &[
             "/bin/sh",
             "-c",
-            "echo updated > allowed; echo okay > src/created",
+            "echo accessible > a; echo new > sibling; mv sibling replaced; cat a",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let notice = stderr
+        .lines()
+        .find(|l| l.contains("Ignored absent deny paths:"))
+        .unwrap();
+    assert!(notice.contains("and 4 other files"), "{notice}");
+    for name in ["a", "b", "c"] {
+        assert!(notice.contains(f.work.join(name).to_str().unwrap()));
+    }
+    for name in ["d", "e", "f", "g"] {
+        assert!(!notice.contains(f.work.join(name).to_str().unwrap()));
+    }
+    assert_eq!(succeeds(output), "accessible\n");
+    // No placeholders were made for the other missing exclusions.
+    for name in ["b", "c", "d", "e", "f", "g"] {
+        assert!(!f.work.join(name).exists());
+    }
+    // On the next launch the now-existing denied file must be protected.
+    denied(f.run("future", &["/bin/cat", "a"]));
+    // A missing credential deny outside CWD must not freeze its home parent either.
+    fs::remove_file(f.work.join(".env")).unwrap();
+    succeeds(f.run(
+        "default",
+        &[
+            "/bin/sh",
+            "-c",
+            "echo new > .env; mkdir \"$HOME/.aws\"; echo credential > \"$HOME/.aws/credentials\"",
         ],
     ));
-    denied(f.run("future", &["/bin/mkdir", "future"]));
-    denied(f.run("future", &["/bin/sh", "-c", "ln -s src future"]));
-    denied(f.run("future", &["/bin/mv", "src", "future"]));
-    denied(f.run("future", &["/bin/sh", "-c", "echo bad > new-sibling"]));
-    let after: Vec<_> = fs::read_dir(&f.work)
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert_eq!(before, after);
-    assert!(!f.work.join("future").exists());
-    // Built-in absent credentials use the same enforcement, including .env.
-    fs::remove_file(f.work.join(".env")).unwrap();
-    denied(f.run("default", &["/bin/sh", "-c", "echo bad > .env"]));
-    assert!(!f.work.join(".env").exists());
+    denied(f.run("default", &["/bin/cat", ".env"]));
+    denied(f.run(
+        "default",
+        &[
+            "/bin/cat",
+            f.home.join(".aws/credentials").to_str().unwrap(),
+        ],
+    ));
 }
 
 /// Child grants cannot expose inherited denies or externally symlinked profile sources.

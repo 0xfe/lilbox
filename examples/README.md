@@ -1,7 +1,7 @@
 # Example profiles
 
 These are editable starting points. `lilbox init` installs only the shipped
-`default` and `isolated` profiles; it does not install this gallery.
+`default`, `permissive`, and `isolated` profiles plus AGENTS.md; it does not install this gallery.
 
 | Profile | Parent | Effective behavior |
 | --- | --- | --- |
@@ -69,8 +69,9 @@ Use [the configuration guide](../README.md#profiles) and
 [the complete permissions reference](../docs/profiles.md) when adapting these
 examples. Run `lilbox check` from the intended working directory after editing.
 
-On Linux these profiles use bubblewrap. Missing deny paths require read-only
-directory entries in their nearest existing parent, which `check` reports as
-warnings and `check --strict` treats as failures. Review those warnings before use;
-see [Linux permissions](../docs/profiles.md#linux-bubblewrap-permissions). The
-workspace profiles include system library/configuration grants for both OSes.
+On Linux these profiles use bubblewrap. Denied paths absent at startup are ignored
+for that run; their parent directories stay writable and no placeholders are made.
+Check reports these omissions as warnings, so strict mode may fail on a fresh
+filesystem. Review the ignored paths and understand that later creation/access can
+be allowed. See [Linux permissions](../docs/profiles.md#linux-bubblewrap-permissions).
+The workspace profiles include system library/configuration grants for both OSes.

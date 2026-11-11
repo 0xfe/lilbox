@@ -55,7 +55,7 @@ install prefix=(env_var("HOME") + "/.local"):
     install -m 755 target/release/lilbox "$1/bin/lilbox"
     echo "Installed $1/bin/lilbox"
 
-# Run the debug build: just run --print-policy.
+# Run the debug build: just run policy.
 run *args:
     cargo run --locked -- "$@"
 

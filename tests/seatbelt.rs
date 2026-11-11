@@ -134,7 +134,7 @@ fn startup_display_reports_version_profile_and_command_on_stderr() {
         String::from_utf8_lossy(&output.stderr)
             .contains(r#"└ command  /bin/zsh -f -i -c "exit 0""#)
     );
-    let output = f.command("default").arg("--print-policy").output().unwrap();
+    let output = f.command("default").arg("policy").output().unwrap();
     succeeds(&output);
     assert!(output.stderr.is_empty());
     assert!(String::from_utf8_lossy(&output.stdout).starts_with("(version 1)"));

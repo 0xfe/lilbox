@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Offline installer and release-request tests; never contact GitHub or publish."""
 import argparse
+import errno
+import select
+import signal
+import time
 import hashlib
 import io
 import json
@@ -194,7 +198,7 @@ esac
                   'Preparing lilbox', 'Downloading ' + archive.name,
                   'Downloading ' + archive.name + '.sha256', 'Verifying the archive SHA-256 checksum',
                   'Extracting the executable', 'Copying the executable', 'Checking the executable version',
-                  'Installing ' + str(self.prefix), 'Initializing missing profiles', 'Installed and ready']
+                  'Installing ' + str(self.prefix), 'Initializing profiles', 'Installed and ready']
         output = result.stdout.decode()
         positions = [output.index(stage) for stage in stages]
         self.assertEqual(positions, sorted(positions))
@@ -204,7 +208,7 @@ esac
         self.assert_failed(result)
         self.assertIn(b'Verifying the archive', result.stdout)
         for stage in ('Finding the latest stable release', 'Extracting the executable',
-                      'Copying the executable', 'Initializing missing profiles', 'Installed and ready'):
+                      'Copying the executable', 'Initializing profiles', 'Installed and ready'):
             self.assertNotIn(stage.encode(), result.stdout)
 
     # Every pre-replacement failure must keep the old binary and remove staging files.
@@ -268,7 +272,7 @@ esac
         result = self.install('--version', version)
         self.assertEqual(result.returncode, 0, result.stderr)
         config = self.home / '.config/lilbox'
-        for name in ('default', 'isolated'):
+        for name in ('default', 'permissive', 'isolated'):
             self.assertEqual((config / f'{name}.toml').read_bytes(), (ROOT / 'profiles' / f'{name}.toml').read_bytes())
         custom = config / 'default.toml'
         custom.write_text('# Handwritten profile; must survive upgrades.\n')
@@ -279,6 +283,7 @@ esac
         result = self.install('--version', version)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(custom.read_text(), '# Handwritten profile; must survive upgrades.\n')
+        self.assertEqual((config / f'default.toml.{version}').read_bytes(), (ROOT / 'profiles/default.toml').read_bytes())
         self.assertEqual(custom.stat().st_mtime_ns, original.st_mtime_ns)
         self.assertEqual(custom.stat().st_ino, original.st_ino)
         self.assertEqual(extra.read_text(), '# Custom named profile.\n')
@@ -348,6 +353,87 @@ esac
         result = self.install('--version', VERSION)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(b'export PATH=', result.stdout)
+
+    # Pinned pre-0.4 executables must not receive flags their init parser rejects.
+    def test_legacy_pinned_release_uses_original_init(self):
+        self.archive(content=b'#!/bin/sh\ncase "$1" in --version) echo "lilbox 0.3.0" ;; init) [ "$#" = 1 ] ;; *) exit 2 ;; esac\n')
+        result = self.install('--version', VERSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.install('--version', VERSION, '--overwrite-profiles')
+        self.assert_failed(result)
+        self.assertIn(b'requires lilbox 0.4.0', result.stderr)
+
+    # Give the installer a controlling terminal so its /dev/tty prompt is exercised.
+    def interactive_install(self, version, reply):
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execve('/bin/sh', ['sh', str(ROOT / 'install.sh'), '--prefix', str(self.prefix),
+                                 '--version', version], self.env)
+        chunks = bytearray()
+        answered = False
+        finished = False
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if not select.select([master], [], [], 0.2)[0]:
+                    continue
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    break
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+                if not answered and b'[y/N]' in chunks:
+                    os.write(master, reply.encode() + b'\n')
+                    answered = True
+            else:
+                self.fail('installer terminal prompt timed out')
+            _, status = os.waitpid(pid, 0)
+            finished = True
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0, chunks.decode())
+            self.assertTrue(answered, chunks.decode())
+            return bytes(chunks)
+        finally:
+            os.close(master)
+            if not finished:
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+    # Both interactive choices must handle every shipped file, including the guide.
+    def test_profile_overwrite_prompt_accept_and_decline(self):
+        version = self.real_archive()
+        config = self.home / '.config/lilbox'
+        config.mkdir(parents=True)
+        for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
+            (config / name).write_text('user custom file')
+        (config / 'work.toml').write_text('custom named profile')
+        self.interactive_install(version, 'n')
+        for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
+            self.assertEqual((config / name).read_text(), 'user custom file')
+            source = ROOT / ('docs/LILBOX-AGENTS.md' if name == 'AGENTS.md' else 'profiles/' + name)
+            self.assertEqual((config / f'{name}.{version}').read_bytes(), source.read_bytes())
+        self.interactive_install(version, 'yes')
+        for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
+            source = ROOT / ('docs/LILBOX-AGENTS.md' if name == 'AGENTS.md' else 'profiles/' + name)
+            self.assertEqual((config / name).read_bytes(), source.read_bytes())
+        self.assertEqual((config / 'work.toml').read_text(), 'custom named profile')
+
+    # Explicit overwrite must work without a terminal and leave custom names alone.
+    def test_overwrite_profiles_flag_replaces_shipped_files(self):
+        version = self.real_archive()
+        config = self.home / '.config/lilbox'
+        config.mkdir(parents=True)
+        (config / 'default.toml').write_text('custom default')
+        (config / 'AGENTS.md').write_text('custom guide')
+        result = self.install('--version', version, '--overwrite-profiles')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((config / 'default.toml').read_bytes(), (ROOT / 'profiles/default.toml').read_bytes())
+        self.assertEqual((config / 'AGENTS.md').read_bytes(), (ROOT / 'docs/LILBOX-AGENTS.md').read_bytes())
+        self.assertFalse((config / f'default.toml.{version}').exists())
+
 
 
 

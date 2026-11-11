@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — 2026-11-11
+
+- Linux now ignores deny paths absent at startup instead of restricting parent
+  directory entries. Startup and checks summarize three ignored paths and the
+  remainder count. Paths created later in the run may be accessible.
+- Replace `--print-policy` with the indented, colored `policy` subcommand. Add
+  `profile check`, `profile show --all --origins`, and read-only `profile cani`
+  queries for paths, environment names, and networking.
+- Move the open baseline into `permissive`; the shipped `default` inherits it.
+  Both have embedded fallbacks. Existing standalone defaults remain valid.
+- Bundle the agent customization guide in docs and install it as config AGENTS.md.
+  Launches and init report the guide path. Installer upgrades prompt before
+  replacing shipped profiles/guide; decline/no terminal writes versioned
+  alternatives. `--overwrite-profiles` explicitly opts into replacement.
+- Expand source comments, profile documentation, and regression coverage.
+- Add the landing page and separate website/installer publishing workflows.
+
 ## 0.3.1 — 2026-11-08
 
 - Add `just bump [VERSION]` and `just release [VERSION]` with stable-version

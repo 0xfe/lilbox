@@ -1,0 +1,21 @@
+# Standalone profile; also built into lilbox when this file is absent.
+version = 1
+mode = "open"
+# Unrestricted sockets; native macOS trust services / Linux system CA reads.
+network = "allow"
+
+[filesystem]
+protect_credentials = true
+# Additional absolute, ~/, ${HOME}/, ${CWD}/, or working-directory-relative paths.
+deny = []
+
+[environment]
+inherit = true
+# Proxy and CA certificate settings are inherited for normal HTTPS connectivity.
+# Explicitly pass an otherwise scrubbed variable, only if you trust the agent:
+# keep = ["ANTHROPIC_API_KEY"]
+keep = []
+drop = []
+
+[runtime]
+temporary_directory = true

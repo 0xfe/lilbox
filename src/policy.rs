@@ -59,7 +59,7 @@ pub struct ContextPaths {
     pub home: PathBuf,
     /// Launch working directory, also the base for relative profile paths.
     pub cwd: PathBuf,
-    /// Selected configuration directory, always protected from the target.
+    /// Selected configuration directory, denied subject to Linux's existence check.
     pub config: PathBuf,
     /// Persistent per-user scratch directory, granted only when requested.
     pub temporary: PathBuf,
@@ -78,6 +78,8 @@ pub struct Policy {
     pub write: BTreeSet<PathBuf>,
     /// Exclusions that override grants and require ancestor rename protection.
     pub deny: BTreeSet<PathBuf>,
+    /// Linux startup exclusions that were absent and therefore not enforced.
+    pub ignored_denies: BTreeSet<PathBuf>,
     /// Whether the profile explicitly enables ordinary runtime operations.
     pub basic_runtime: bool,
     /// Enables shared path denies and backend-specific credential restrictions.
@@ -85,6 +87,21 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// Snapshot missing exclusions without creating host placeholders or freezing parents.
+    /// Other I/O errors still fail; missing names can become accessible later in this run.
+    pub fn ignore_missing_denies(&mut self) -> Result<()> {
+        let mut retained = BTreeSet::new();
+        for path in &self.deny {
+            if path.try_exists()? {
+                retained.insert(path.clone());
+            } else {
+                self.ignored_denies.insert(canonicalize_future(path)?);
+            }
+        }
+        self.deny = retained;
+        Ok(())
+    }
+
     /// Expand configured paths and add credential, config, and scratch rules.
     /// The loader adds individual inherited profile files to the resulting deny set.
     pub fn resolve(profile: &Profile, paths: &ContextPaths) -> Result<Self> {
@@ -98,6 +115,7 @@ impl Policy {
             read: BTreeSet::new(),
             write: BTreeSet::new(),
             deny: BTreeSet::new(),
+            ignored_denies: BTreeSet::new(),
             basic_runtime: profile.runtime.basic,
             protect_credentials: profile.filesystem.protect_credentials,
         };
@@ -115,7 +133,8 @@ impl Policy {
                 policy.deny.extend(resolve_path(input, paths)?);
             }
         }
-        // Configuration cannot be altered by a sandboxed agent to weaken its next run.
+        // Protect configuration against changes that weaken later runs. Linux
+        // omits this exclusion if the directory is absent at startup.
         policy.deny.extend(path_aliases(&paths.config)?);
         if profile.runtime.temporary_directory {
             policy.write.extend(path_aliases(&paths.temporary)?);

@@ -18,9 +18,11 @@ is a historical implementation/verification record.
 
 - `src/main.rs`: CLI, configuration lookup, launch orchestration.
 - `src/config.rs`: strict TOML schema, inheritance resolution, dependency protection,
-  and non-overwriting initialization.
+  provenance tracking, and explicit preserve/versioned/overwrite initialization.
 - `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
+- `src/display.rs`: terminal-safe formatting, colors, and native policy indentation.
+- `src/inspect.rs`: effective profile summaries, origins, and static cani queries.
 - `src/environment.rs`: environment filtering/normalization and shell arguments.
 - `src/backend/`: backend interface, Seatbelt rendering/runtime SBPL, and Linux
   bubblewrap mount planning plus seccomp filtering.
@@ -28,7 +30,7 @@ is a historical implementation/verification record.
 - `profiles/`: shipped TOML files embedded into the executable.
 - `examples/`: annotated standalone/inherited profiles; validate with
   `just run --config-dir examples check --strict` when changing the gallery.
-  On Linux, review expected missing-deny parent warnings as well; strict mode
+  On Linux, review ignored absent-deny warnings as well; strict mode
   intentionally fails on those filesystem-dependent warnings.
 - `tests/bubblewrap.rs`: actual Linux enforcement; needs bubblewrap 0.6.3+,
   permitted user namespaces/seccomp, Python 3, and public CA certificates.
@@ -50,7 +52,7 @@ Installer/release-script tests and release packaging additionally need Python 3.
 just                          # list recipes
 just build                    # debug build, locked dependencies
 just run --help
-just run --print-policy
+just run policy
 just run check                # inspect every profile without launching
 just run -p default check --strict
 just fmt
@@ -58,8 +60,10 @@ just install                  # writes ~/.local/bin/lilbox
 just install /custom/prefix    # writes PREFIX/bin/lilbox
 ```
 
-`lilbox init` writes missing profiles to the user's config directory and never
-overwrites existing files. Prefer temporary homes/config directories for tests;
+`lilbox init` writes missing default/permissive/isolated profiles and AGENTS.md.
+Ordinary init preserves existing files; `--versioned` writes inactive versioned
+alternatives and `--overwrite-profiles` explicitly replaces regular shipped files.
+Default inherits permissive; both have embedded fallbacks. Prefer temporary homes/config directories for tests;
 do not modify real credentials or user profiles as test fixtures.
 
 ## Testing
@@ -111,9 +115,10 @@ contents change. Finish with `git diff --check` and review the diff.
   retain secret/injection filtering and explicit drop precedence.
 - Do not imply that private-keychain file denial blocks all service-mediated
   keychain access. Document the actual boundary.
-- On Linux, preserve missing-path deny protection without creating host
-  placeholders: read-only parents and their diagnostics are intentional. Apply
-  mounts parent-first and denies last; preserve canonical symlink semantics.
+- On Linux, ignore absent deny paths at startup and report at most three plus a
+  remainder count. Do not create placeholders or freeze their parent directories.
+  Names created later may be accessible. Existing denies retain precedence and
+  ancestor protection. Apply mounts parent-first and denies last; preserve aliases.
 - Linux network deny must block Unix sockets as well as TCP/UDP. A network
   namespace alone is insufficient. Keep syscall ABI checks and descriptor ownership.
 - Keep allocation/locking out of the `pre_exec` callback; descriptor enumeration
@@ -139,7 +144,8 @@ just release 0.4.0                   # prepare if newer; rerun after manual comm
 
 `scripts/release.sh` supports ARM64 and x86_64 macOS/Linux (GNU or musl on Linux), builds with locked
 dependencies, and writes versioned archives/checksums in `dist/`. Archives include
-the executable, README, license, changelog, `install.sh`, profiles, `examples/`, and `docs/`. Verify the
+the executable, README, license, changelog, `install.sh`, profiles, `examples/`, and `docs/`
+(including LILBOX-AGENTS.md, installed by init as config AGENTS.md). Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
 `just package` is local: it does not sign, notarize, tag, or publish a release.
 `just release [VERSION]` prepares a newer optional version and stops; otherwise,
@@ -155,8 +161,10 @@ aligned. Test installer/request scripts offline with `just test-release`; never
 publish a release merely to test automation.
 Installer tests build and install the native executable into temporary homes and
 prefixes, covering `init` without clobbering existing configs, terminal output,
-and failure recovery. `install.sh` initializes missing profiles after replacing
-the executable; initialization failure must report a partial install and exit
+and failure recovery. The installer asks via /dev/tty before overwriting existing
+shipped profiles/guide, preserves versioned alternatives on decline/no terminal,
+and accepts --overwrite-profiles for explicit replacement. It initializes after
+replacing the executable; initialization failure must report a partial install and exit
 nonzero. Keep CI's `scripts/test_release.py --binary PATH` pointing at its native
 target binary, and never use real user configs as installer fixtures.
 `just release-installer` separately publishes the local `install.sh` using

@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use lilbox::{backend, check, config, environment, launch, policy::ContextPaths};
+use lilbox::{backend, check, config, display, environment, inspect, launch, policy::ContextPaths};
 use std::{
     ffi::OsString,
     io::{IsTerminal, Write},
@@ -19,22 +19,22 @@ use std::{
     disable_version_flag = true,
     before_help = concat!("lilbox ", env!("CARGO_PKG_VERSION")),
     about = "Run coding agents and commands in a configurable OS sandbox",
-    after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox --print-policy\n\nRun `lilbox init` to create example profiles."
+    after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox policy\n\nRun `lilbox init` to create profiles and an agent guide.\nTell your coding agent to read ~/.config/lilbox/AGENTS.md to customize lilbox."
 )]
 struct Cli {
     /// Print version
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
     /// Profile name (launch default: default; check default: all profiles)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     profile: Option<String>,
     /// Override ~/.config/lilbox (or $XDG_CONFIG_HOME/lilbox)
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", global = true)]
     config_dir: Option<PathBuf>,
-    /// Print the effective native sandbox policy without starting a command
-    #[arg(long)]
-    print_policy: bool,
-    // None selects help, except when --print-policy requests inspection.
+    /// Colorize inspection output (auto respects NO_COLOR and TERM=dumb)
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    color: display::Color,
+    // None selects help; inspection uses explicit subcommands.
     #[command(subcommand)]
     command: Option<Action>,
 }
@@ -42,8 +42,22 @@ struct Cli {
 // Built-in actions coexist with external subcommands such as `lilbox codex`.
 #[derive(Subcommand, Debug)]
 enum Action {
-    /// Create default.toml and isolated.toml; preserve existing files
-    Init,
+    /// Install missing starter profiles and the AGENTS.md customization guide
+    Init {
+        /// Replace existing shipped regular files (refuse symlinks)
+        #[arg(long, conflicts_with = "versioned")]
+        overwrite_profiles: bool,
+        /// Preserve existing files and write version-suffixed alternatives
+        #[arg(long)]
+        versioned: bool,
+    },
+    /// Show the effective native system policy with indentation and colors
+    Policy,
+    /// Inspect effective permissions, inheritance, and configuration
+    Profile {
+        #[command(subcommand)]
+        command: ProfileAction,
+    },
     /// Analyze all profiles (or -p NAME) without launching a sandbox
     Check {
         /// Treat warnings as failures too
@@ -67,16 +81,49 @@ enum Action {
     Agent(Vec<OsString>),
 }
 
+// Profile inspection stays separate from arbitrary target argv parsing.
+#[derive(Subcommand, Debug)]
+enum ProfileAction {
+    /// Analyze all profiles (or -p NAME), exactly like lilbox check
+    Check {
+        /// Treat warnings as failures too
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Explain effective access; long lists show three entries by default
+    Show {
+        /// Expand every list instead of abbreviating
+        #[arg(long)]
+        all: bool,
+        /// Label settings and list entries with their source profile
+        #[arg(long)]
+        origins: bool,
+    },
+    /// Ask what the policy permits (static analysis, without performing the operation)
+    Cani {
+        /// Operation to evaluate
+        #[arg(value_enum)]
+        capability: inspect::Capability,
+        /// Path or environment name; network takes no argument
+        argument: Option<String>,
+    },
+}
+
+/// Tell agents where the guide lives, honoring config overrides and escaping controls.
+fn guide_note(directory: &std::path::Path) -> String {
+    format!(
+        "Tell your coding agent to read {} outside the sandbox to learn how to customize lilbox.",
+        display::safe(&directory.join("AGENTS.md").display().to_string())
+    )
+}
+
 /// Resolve one CLI request and return only for inspection, setup, or failure.
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    if cli.command.is_none() && !cli.print_policy {
+    if cli.command.is_none() {
         Cli::command().print_help()?;
         println!();
         return Ok(());
-    }
-    if cli.print_policy && cli.command.is_some() {
-        bail!("--print-policy cannot be combined with a command");
     }
     // Resolve configuration once so init, check, and launch use the same lookup.
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME must be set")?);
@@ -97,17 +144,26 @@ fn run() -> Result<()> {
         },
     };
     // Setup and static analysis do not require a functioning sandbox backend.
-    if matches!(cli.command, Some(Action::Init)) {
-        let created = config::init(&config_directory)?;
+    if let Some(Action::Init {
+        overwrite_profiles,
+        versioned,
+    }) = cli.command
+    {
+        let mode = if overwrite_profiles {
+            config::InitMode::Overwrite
+        } else if versioned {
+            config::InitMode::Versioned
+        } else {
+            config::InitMode::Preserve
+        };
+        let created = config::init_with_mode(&config_directory, mode)?;
         if created.is_empty() {
-            println!(
-                "Profiles already exist in {}; nothing overwritten.",
-                config_directory.display()
-            );
+            println!("Existing profiles and guide preserved; no files written.");
         }
         for path in created {
-            println!("Created {path}");
+            println!("Wrote {}", display::safe(&path));
         }
+        println!("{}", guide_note(&config_directory));
         return Ok(());
     }
     let paths = ContextPaths {
@@ -116,9 +172,15 @@ fn run() -> Result<()> {
         cwd: std::env::current_dir()?,
         config: config_directory,
     };
-    if let Some(Action::Check { strict }) = cli.command {
+    if let Some(
+        Action::Check { strict }
+        | Action::Profile {
+            command: ProfileAction::Check { strict },
+        },
+    ) = cli.command
+    {
         let report = check::analyze(&paths, cli.profile.as_deref())?;
-        report.print();
+        report.print(cli.color.enabled(false));
         if report.failed(strict) {
             bail!("configuration check failed");
         }
@@ -129,12 +191,71 @@ fn run() -> Result<()> {
     let profile_name = cli.profile.as_deref().unwrap_or("default");
     let loaded = config::load_resolved(&paths.config, profile_name)?;
     let policy = loaded.policy(&paths)?;
-    let profile = loaded.profile;
-    let child_environment = environment::build(&profile, &paths, std::env::vars_os())?;
+    let profile = &loaded.profile;
+    let child_environment = environment::build(profile, &paths, std::env::vars_os())?;
     let backend = backend::current()?;
-    if cli.print_policy {
-        print!("{}", backend.render(&policy)?);
-        return Ok(());
+    if !policy.ignored_denies.is_empty() {
+        eprintln!(
+            "{}",
+            display::paint(
+                &display::ignored_denies(&policy),
+                "33",
+                cli.color.enabled(true)
+            )
+        );
+    }
+    match &cli.command {
+        Some(Action::Policy) => {
+            print!(
+                "{}",
+                display::native(&backend.render(&policy)?, cli.color.enabled(false))
+            );
+            return Ok(());
+        }
+        Some(Action::Profile {
+            command: ProfileAction::Show { all, origins },
+        }) => {
+            print!(
+                "{}",
+                inspect::show(
+                    &loaded,
+                    &policy,
+                    &paths,
+                    *all,
+                    *origins,
+                    cli.color.enabled(false)
+                )
+            );
+            return Ok(());
+        }
+        Some(Action::Profile {
+            command:
+                ProfileAction::Cani {
+                    capability,
+                    argument,
+                },
+        }) => {
+            backend.render(&policy)?;
+            let answer = inspect::cani(&loaded, &policy, &paths, *capability, argument.as_deref())?;
+            let (label, style) = match answer.allowed {
+                Some(true) => ("ALLOW", "32"),
+                Some(false) => ("DENY", "31"),
+                None => ("INDETERMINATE", "33"),
+            };
+            println!(
+                "{}: {}",
+                display::paint(label, style, cli.color.enabled(false)),
+                display::safe(&answer.reason)
+            );
+            println!(
+                "Static policy answer; host permissions, runtime dependencies, and native operation rules still apply."
+            );
+            if answer.allowed != Some(true) {
+                bail!("capability is denied or indeterminate");
+            }
+            return Ok(());
+        }
+        _ => {}
     }
     // Shell selection uses the parent's SHELL; the child receives the separately
     // sanitized environment. Explicit programs retain their original OS strings.
@@ -156,11 +277,14 @@ fn run() -> Result<()> {
             command.extend(args);
             command
         }
-        Action::Init | Action::Check { .. } => unreachable!(),
+        Action::Init { .. } | Action::Check { .. } | Action::Policy | Action::Profile { .. } => {
+            unreachable!()
+        }
     };
     if profile.runtime.temporary_directory {
         launch::prepare_temporary(&paths.temporary)?;
     }
+    eprintln!("{}", guide_note(&paths.config));
     print_startup(profile_name, &argv)?;
     launch::execute(backend.as_ref(), &policy, &argv, child_environment)
 }
@@ -210,7 +334,7 @@ fn print_startup(profile: &str, argv: &[OsString]) -> Result<()> {
 /// Print contextual failures and exit unsuccessfully; never retry unsandboxed.
 fn main() {
     if let Err(error) = run() {
-        eprintln!("lilbox: {error:#}");
+        eprintln!("lilbox: {}", display::safe(&format!("{error:#}")));
         std::process::exit(1);
     }
 }

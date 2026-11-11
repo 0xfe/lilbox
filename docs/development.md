@@ -19,7 +19,7 @@ and [design.md](design.md) for module responsibilities.
 | `just` | List recipes. |
 | `just build` | Build with locked dependencies. |
 | `just run --help` | Run the debug executable. |
-| `just run --print-policy` | Inspect the native sandbox policy. |
+| `just run policy` | Inspect the native sandbox policy. |
 | `just fmt` | Format Rust sources. |
 | `just install` | Install to `~/.local/bin`. |
 | `just install /custom/prefix` | Install to `PREFIX/bin`. |
@@ -178,7 +178,8 @@ sha256sum -c lilbox-VERSION-TARGET.tar.gz.sha256
 
 Then extract and smoke-test the executable on a matching host, using temporary
 home/config directories. Confirm the archive includes the executable, README,
-license, changelog, `install.sh`, `profiles/`, `examples/`, and `docs/`.
+license, changelog, `install.sh`, all three profiles, `examples/`, and `docs/`,
+including `docs/LILBOX-AGENTS.md`. Init installs the guide as config `AGENTS.md`.
 The automated host check is `python3 scripts/verify-archive.py dist/ARCHIVE.tar.gz`;
 it verifies checksums, contents, version flags, and launches with both profiles.
 
@@ -208,12 +209,23 @@ extracts only the executable, and verifies its embedded version. A temporary fil
 in the destination directory permits atomic replacement; failed downloads/checks
 leave an existing installation intact. Destination symlinks/directories are
 rejected. After replacement, the installer invokes that exact executable's `init`
-command to create missing `default.toml` and `isolated.toml` profiles in
-`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Existing files and symlinks are preserved,
-including during upgrades. Initialization needs no sandbox backend. If it fails,
-the installer exits unsuccessfully, explains that the binary was installed, and
-prints the command to retry after fixing the config-directory problem. Some
-missing profiles may already have been created; retrying is safe.
+command to install default/permissive/isolated profiles and `AGENTS.md` in
+`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Existing shipped files trigger one
+confirmation prompt via `/dev/tty`, which works with piped installer input.
+Declining or having no usable controlling terminal invokes `init --versioned`:
+existing files/symlinks are preserved, and alternatives such as
+`default.toml.0.4.0` and `AGENTS.md.0.4.0` are written without clobbering prior
+alternatives. These are inactive until reviewed and renamed.
+
+Pinned pre-0.4 releases use their original non-overwriting init without the new
+flags or guide; an overwrite request for those versions is rejected before install.
+
+Passing `--overwrite-profiles` to the installer opts into `init --overwrite-profiles`
+without prompting. It replaces shipped regular files atomically, refuses symlink
+or non-regular destinations, and preserves custom named profiles. Ordinary direct
+`lilbox init` still only fills missing files. Init prints the customization-guide
+path, as do launches. Initialization requires no backend. Failure reports a
+partial installation and a retry command; earlier files may already be written.
 
 Progress messages identify platform selection, release lookup, archive/checksum
 downloads, checksum verification, extraction, copying, executable validation,
@@ -230,7 +242,8 @@ must still allow actual execution.
 initialization failure reporting, terminal colors, and PATH quoting. It also
 installs the actual built executable into temporary prefixes and homes to verify
 fresh configs, missing-profile creation, custom XDG paths, and preservation of
-existing files/symlinks. CI runs these tests with each native target's binary.
+existing files/symlinks, versioned alternatives, explicit overwrite, and both
+interactive prompt responses. CI runs these tests with each native target's binary.
 Downloads are fixture-backed; tests never contact GitHub or modify real profiles.
 
 Checksums detect damaged or mismatched downloads; they are distributed from the

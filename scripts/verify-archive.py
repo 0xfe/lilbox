@@ -33,7 +33,7 @@ def verify(archive):
                     destination.chmod(member.mode & 0o777)
         package = root / name
         for entry in ('lilbox', 'README.md', 'LICENSE', 'CHANGELOG.md', 'install.sh',
-                      'profiles/default.toml', 'profiles/isolated.toml',
+                      'profiles/default.toml', 'profiles/permissive.toml', 'profiles/isolated.toml', 'docs/LILBOX-AGENTS.md',
                       'examples/README.md', 'docs/design.md', 'docs/profiles.md',
                       'docs/development.md', 'docs/security.md'):
             assert (package / entry).is_file(), f'Missing {entry}'
@@ -49,6 +49,8 @@ def verify(archive):
         env = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'TERM': 'dumb'}
         command = [str(binary), '--config-dir', str(config)]
         subprocess.run(command + ['init'], env=env, cwd=work, check=True, capture_output=True)
+        assert (config / 'AGENTS.md').read_bytes() == (package / 'docs/LILBOX-AGENTS.md').read_bytes()
+        assert (config / 'permissive.toml').is_file()
         for profile in ('default', 'isolated'):
             result = subprocess.run(command + ['-p', profile, 'exec', '/bin/sh', '-c', 'printf archive-ok'],
                                     env=env, cwd=work, capture_output=True, check=True)

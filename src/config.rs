@@ -1,4 +1,4 @@
-//! Strict profile parsing, inheritance, and non-overwriting initialization.
+//! Strict profile parsing, inheritance/provenance, and atomic profile initialization.
 //! Merge raw TOML before applying defaults so omitted child fields stay omitted.
 
 use anyhow::{Context, Result, bail};
@@ -10,8 +10,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Open starter profile, also used when default.toml is absent.
+/// User customization layer, inheriting the embedded permissive baseline.
 pub const DEFAULT_PROFILE: &str = include_str!("../profiles/default.toml");
+/// Open baseline, also available without running init.
+pub const PERMISSIVE_PROFILE: &str = include_str!("../profiles/permissive.toml");
+/// Instructions installed beside profiles for other coding agents.
+pub const AGENT_GUIDE: &str = include_str!("../docs/LILBOX-AGENTS.md");
 /// Closed starter profile written by init; it is not an automatic fallback.
 pub const ISOLATED_PROFILE: &str = include_str!("../profiles/isolated.toml");
 
@@ -165,6 +169,19 @@ pub struct LoadedProfile {
     pub sources: Vec<PathBuf>,
     /// Base-to-child names for explaining the effective configuration.
     pub chain: Vec<String>,
+    /// Validated source documents, retained for exact field/item provenance.
+    pub documents: Vec<SourceDocument>,
+}
+
+/// One validated input before defaults or inheritance are applied.
+#[derive(Debug)]
+pub struct SourceDocument {
+    /// Profile name used in origin labels.
+    pub name: String,
+    /// Whether the document came from the embedded fallback.
+    pub embedded: bool,
+    /// Explicit TOML fields only; assignment values must never be printed.
+    pub fields: toml::Value,
 }
 
 impl LoadedProfile {
@@ -174,7 +191,43 @@ impl LoadedProfile {
         for source in &self.sources {
             policy.deny.extend(crate::policy::path_aliases(source)?);
         }
+        #[cfg(target_os = "linux")]
+        policy.ignore_missing_denies()?;
         Ok(policy)
+    }
+
+    /// Identify the last scalar override or the first introduction of a list item.
+    pub fn origin(&self, field: &str, item: Option<&str>) -> String {
+        let mut found = None;
+        for document in &self.documents {
+            let value = field
+                .split('.')
+                .try_fold(&document.fields, |v, key| v.get(key));
+            let matches = match (value, item) {
+                (Some(toml::Value::Array(items)), Some(item)) => {
+                    items.iter().any(|v| v.as_str() == Some(item))
+                }
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if matches {
+                found = Some(format!(
+                    "{}{}",
+                    document.name,
+                    if document.embedded { " (embedded)" } else { "" }
+                ));
+                if item.is_some() {
+                    break;
+                }
+            }
+        }
+        found.unwrap_or_else(|| {
+            if matches!(field, "network" | "environment.inherit") {
+                format!("mode-dependent default ({})", self.origin("mode", None))
+            } else {
+                "schema default".into()
+            }
+        })
     }
 }
 
@@ -187,11 +240,20 @@ pub fn load(directory: &Path, name: &str) -> Result<Profile> {
 pub fn load_resolved(directory: &Path, name: &str) -> Result<LoadedProfile> {
     let mut sources = Vec::new();
     let mut chain = Vec::new();
-    let value = resolve(directory, name, &mut Vec::new(), &mut sources, &mut chain)?;
+    let mut documents = Vec::new();
+    let value = resolve(
+        directory,
+        name,
+        &mut Vec::new(),
+        &mut sources,
+        &mut chain,
+        &mut documents,
+    )?;
     Ok(LoadedProfile {
         profile: value.try_into()?,
         sources,
         chain,
+        documents,
     })
 }
 
@@ -202,6 +264,7 @@ fn resolve(
     visiting: &mut Vec<(String, PathBuf)>,
     sources: &mut Vec<PathBuf>,
     chain: &mut Vec<String>,
+    documents: &mut Vec<SourceDocument>,
 ) -> Result<toml::Value> {
     validate_name(name)?;
     let path = directory.join(format!("{name}.toml"));
@@ -219,25 +282,36 @@ fn resolve(
     if visiting.len() >= 64 {
         bail!("inheritance exceeds 64 profiles at {name}");
     }
+    let mut embedded = false;
     let source = match fs::read_to_string(&path) {
         Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && name == "default" => {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && matches!(name, "default" | "permissive") =>
+        {
             // A dangling symlink is an invalid configuration, not a missing one.
             if fs::symlink_metadata(&path).is_ok() {
                 bail!("cannot read profile {}: {error}", path.display());
             }
-            DEFAULT_PROFILE.to_owned()
+            embedded = true;
+            if name == "default" {
+                DEFAULT_PROFILE
+            } else {
+                PERMISSIVE_PROFILE
+            }
+            .to_owned()
         }
         Err(error) => {
             return Err(error).with_context(|| format!("cannot read profile {}", path.display()));
         }
     };
     let mut child = document(&source).with_context(|| format!("profile {}", path.display()))?;
+    let fields = child.clone();
     let parent = child.as_table_mut().unwrap().remove("extends");
     visiting.push((name.to_owned(), identity));
     let merged = if let Some(parent) = parent {
         let parent = parent.as_str().unwrap(); // validated by document
-        let mut base = resolve(directory, parent, visiting, sources, chain)
+        let mut base = resolve(directory, parent, visiting, sources, chain, documents)
             .with_context(|| format!("profile {name} extends {parent}"))?;
         merge(&mut base, child);
         base
@@ -250,6 +324,11 @@ fn resolve(
     // Record after recursion so diagnostics and dependency protection see the
     // same base-to-child order used by the merge.
     visiting.pop();
+    documents.push(SourceDocument {
+        name: name.into(),
+        embedded,
+        fields,
+    });
     sources.push(path);
     chain.push(name.to_owned());
     Ok(merged)
@@ -285,18 +364,64 @@ fn merge(base: &mut toml::Value, child: toml::Value) {
     }
 }
 
-/// Atomic, no-clobber creation also refuses existing symlinks.
+/// How init handles existing shipped files; ordinary init always preserves them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitMode {
+    /// Leave every existing entry, including symlinks, unchanged.
+    Preserve,
+    /// Write version-suffixed alternatives without replacing existing alternatives.
+    Versioned,
+    /// Atomically replace regular files; refuse symlinks and non-file entries.
+    Overwrite,
+}
+
+/// Install the three starter profiles and agent guide without replacing user files.
 pub fn init(directory: &Path) -> Result<Vec<String>> {
+    init_with_mode(directory, InitMode::Preserve)
+}
+
+/// Write embedded defaults atomically under the caller's explicit overwrite choice.
+/// Versioned alternatives are deliberately not active profiles until reviewed/renamed.
+pub fn init_with_mode(directory: &Path, mode: InitMode) -> Result<Vec<String>> {
     fs::create_dir_all(directory).context("cannot create profile directory")?;
     let mut created = Vec::new();
-    for (name, contents) in [("default", DEFAULT_PROFILE), ("isolated", ISOLATED_PROFILE)] {
-        let path = directory.join(format!("{name}.toml"));
+    for (name, contents) in [
+        ("permissive.toml", PERMISSIVE_PROFILE),
+        ("default.toml", DEFAULT_PROFILE),
+        ("isolated.toml", ISOLATED_PROFILE),
+        ("AGENTS.md", AGENT_GUIDE),
+    ] {
+        let mut path = directory.join(name);
+        let exists = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if mode == InitMode::Overwrite && !metadata.file_type().is_file() {
+                    bail!("refusing to overwrite non-regular file {}", path.display());
+                }
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error).context("cannot inspect existing profile"),
+        };
+        if exists {
+            match mode {
+                InitMode::Preserve => continue,
+                InitMode::Versioned => {
+                    path = directory.join(format!("{name}.{}", env!("CARGO_PKG_VERSION")))
+                }
+                InitMode::Overwrite => {}
+            }
+        }
         let mut file = tempfile::NamedTempFile::new_in(directory)?;
         file.write_all(contents.as_bytes())?;
-        match file.persist_noclobber(&path) {
+        let result = if mode == InitMode::Overwrite {
+            file.persist(&path)
+        } else {
+            file.persist_noclobber(&path)
+        };
+        match result {
             Ok(_) => created.push(path.display().to_string()),
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.error).context("cannot write profile"),
+            Err(error) => return Err(error.error).context("cannot write profile or agent guide"),
         }
     }
     Ok(created)
@@ -318,11 +443,11 @@ mod tests {
         ] {
             assert!(parse(text).is_err(), "accepted {text}");
         }
-        parse(DEFAULT_PROFILE).unwrap();
+        parse(PERMISSIVE_PROFILE).unwrap();
         parse(ISOLATED_PROFILE).unwrap();
     }
 
-    /// Only an absent default gets a fallback; init must preserve existing user files.
+    /// Built-in fallbacks require absence, and ordinary init preserves existing user files.
     #[test]
     fn selection_and_no_clobber() {
         let root = tempfile::tempdir().unwrap();
@@ -331,7 +456,7 @@ mod tests {
         for name in ["../secret", "/etc/passwd", ".", "a.b", ""] {
             assert!(load(root.path(), name).is_err());
         }
-        assert_eq!(init(root.path()).unwrap().len(), 2);
+        assert_eq!(init(root.path()).unwrap().len(), 4);
         fs::write(root.path().join("default.toml"), "custom").unwrap();
         assert!(init(root.path()).unwrap().is_empty());
         assert_eq!(
@@ -373,6 +498,14 @@ mod inheritance_tests {
         let loaded = load_resolved(root.path(), "child").unwrap();
         assert_eq!(loaded.chain, ["base", "middle", "child"]);
         assert_eq!(loaded.sources.len(), 3);
+        assert_eq!(loaded.origin("filesystem.allow_read", Some("/usr")), "base");
+        assert_eq!(
+            loaded.origin("filesystem.allow_read", Some("/bin")),
+            "middle"
+        );
+        assert_eq!(loaded.origin("runtime.temporary_directory", None), "child");
+        assert_eq!(loaded.origin("runtime.basic", None), "base");
+        assert_eq!(loaded.origin("environment.set.FLAG", None), "middle");
         let p = loaded.profile;
         assert_eq!(p.mode, Mode::Closed);
         assert_eq!(p.network, Some(Network::Allow));

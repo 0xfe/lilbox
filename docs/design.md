@@ -36,6 +36,8 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking, atomic initialization. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
 | [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
+| [src/display.rs](../src/display.rs) | Terminal-safe colors, abbreviated notices, and native policy indentation. |
+| [src/inspect.rs](../src/inspect.rs) | Effective profile display with origins and static capability queries. |
 | [src/environment.rs](../src/environment.rs) | Child environment filtering, normalization, shell startup flags. |
 | [src/backend/mod.rs](../src/backend/mod.rs) | Backend interface and current-platform selection. |
 | [src/backend/seatbelt.rs](../src/backend/seatbelt.rs) | Seatbelt rendering and `sandbox-exec` command construction. |
@@ -43,7 +45,7 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/backend/bubblewrap/seccomp.rs](../src/backend/bubblewrap/seccomp.rs) | Native-ABI syscall filtering for Linux x86_64/aarch64. |
 | [src/backend/runtime.sb](../src/backend/runtime.sb) | Explicit basic runtime capability bundle for closed profiles. |
 | [src/launch.rs](../src/launch.rs) | Scratch directory validation, process hardening, Unix process replacement. |
-| [profiles/](../profiles/) | Embedded default and isolated example TOML files. |
+| [profiles/](../profiles/) | Embedded permissive/default/isolated profiles; the agent guide is embedded from docs/. |
 
 The library exposes these modules; the binary coordinates them. `anyhow` carries
 contextual errors, Clap parses arguments, Serde/TOML parse configuration, `tempfile`
@@ -70,28 +72,34 @@ flowchart TD
     Exec --> Child[Run target under inherited OS restrictions]
 ```
 
-1. With no command and no `--print-policy`, help is printed successfully before
+1. With no command, help is printed successfully before
    requiring configuration or a backend. Help and `-v` / `--version` (also `-V`)
    show the package version embedded at compile time from `Cargo.toml`.
 2. `HOME` must be present and absolute. The configuration directory comes from
    `--config-dir`, otherwise nonempty absolute `XDG_CONFIG_HOME` plus `/lilbox`,
    otherwise `~/.config/lilbox`. Relative `--config-dir` paths use the launch CWD.
-3. `init` creates missing `default.toml` and `isolated.toml` and exits. `check`
+3. `init` creates missing default/permissive/isolated profiles and AGENTS.md, then
+   prints the guide path. `--versioned` preserves alternatives; explicit
+   `--overwrite-profiles` atomically replaces regular shipped files. `check` (also `profile check`)
    analyzes configurations and exits without executing a sandbox or creating
    scratch storage. Neither command requires an OS execution backend.
 4. Normal launches load the selected profile, resolve paths, protect the config
    directory and every inherited profile file, and build the child environment.
-5. Backend selection succeeds on macOS and Linux. `--print-policy` prints
+5. Backend selection succeeds on macOS and Linux. `policy` prints
    resolved native rules without launching a command or creating scratch storage.
-   It cannot be combined with a command. It validates configuration/environment
-   settings, but does not ask the kernel to compile or enforce the rendered policy.
+   It uses indentation and terminal-aware color. `profile show` explains access,
+   with `--all` and `--origins` for detail. `profile cani` answers static capability
+   queries. These validate configuration/environment settings without asking the
+   kernel to compile or enforce the rendered policy. Linux snapshots absent deny
+   paths out of the effective policy and prints a capped ignored-path notice.
 6. A launch selects the command, prepares scratch storage if requested, prints and
    flushes a startup summary to stderr, and invokes the backend command with the
    sanitized environment. The summary shows the embedded version, selected profile
    name, and actual command including shell startup flags. Complex arguments are
    quoted and terminal controls/non-UTF-8 bytes escaped for display only. Color
    requires a stderr terminal, no `NO_COLOR`, and a TERM other than `dumb`.
-   Inspection and configuration commands have no startup summary.
+   Launches also print the customization guide path. Inspection and configuration
+   commands have no startup banner.
 7. On Unix, `CommandExt::exec` replaces lilbox with
    `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>` or
    `/usr/bin/bwrap <mount/namespace/filter arguments> -- <program> <args...>`.
@@ -114,15 +122,18 @@ The schema requires `version = 1`. Unknown fields in every configuration table,
 unknown enum values, and unsupported versions are errors. Profile names contain
 1–64 ASCII letters, digits, underscores, or hyphens; path traversal is rejected.
 
-`default` falls back to the embedded [default.toml](../profiles/default.toml)
-only when its file is absent. Malformed files and dangling profile symlinks fail.
-Other names, including `isolated`, require a file. `init` makes them available by
-writing the embedded examples via temporary files and `persist_noclobber`.
-Existing files, including symlinks, are never overwritten.
+`default` and `permissive` fall back to their embedded TOML only when absent.
+The shipped default inherits permissive; old standalone default files remain
+valid. Malformed files and dangling profile symlinks fail. Other names, including
+isolated, require files. Ordinary `init` uses temporary files and
+`persist_noclobber` to create three profiles and the embedded agent guide without
+replacing existing files or symlinks. Versioned initialization uses the same
+no-clobber operation for `NAME.toml.VERSION`/`AGENTS.md.VERSION` alternatives.
+Explicit overwrite refuses non-regular destinations and uses atomic persist for
+regular files. Custom named profiles are never part of this write set.
 
-Updating the executable changes the embedded fallback and examples used for new
-files, but does not replace existing user TOML files. Existing profiles still use
-the new executable's policy renderer, environment filter, and shared deny list.
+Updating the executable changes embedded defaults and shared enforcement rules.
+Existing active TOML is replaced only with explicit init/installer authorization.
 
 `Mode`, `Network`, and resolved read/write/deny path sets form the portable policy.
 `BTreeSet` deduplicates paths and gives deterministic ordering. The environment
@@ -131,7 +142,10 @@ is constructed separately as a `BTreeMap<OsString, OsString>`.
 ### Resolution and merge
 
 `config::load_resolved` returns a `LoadedProfile` containing the effective typed
-profile, the dependency names, and every source path in base-to-child order.
+profile, the dependency names, every source path, and validated raw source
+documents in base-to-child order. Origins use the last explicit scalar/map-key
+assignment or first introduction of a deduplicated list item. Schema defaults
+and built-in filesystem/environment restrictions are labeled separately.
 Resolution validates each file with the strict Serde schema, then retains its
 TOML value without schema defaults for merging. This avoids mistaking an omitted child boolean
 for an explicit `false`, or injecting mode-dependent defaults before the final
@@ -141,8 +155,8 @@ A depth-first resolver tracks active names and canonical file targets. Repeated
 names/targets are dependency cycles; error contexts show the chain. A 64-profile
 limit bounds recursion, including hard-link or otherwise unusual aliases. Invalid
 parent names cannot escape the configuration directory through path traversal.
-Symlinked files are intentionally supported. Only a genuinely absent `default`
-uses the embedded fallback, including when it is a parent.
+Symlinked files are intentionally supported. Only genuinely absent `default`/`permissive` files
+use their embedded fallbacks, including when it is a parent.
 
 Merge tables recursively, append arrays with stable exact-value deduplication,
 and replace scalar values with explicit child values. Remove `extends` before
@@ -156,13 +170,14 @@ a configuration directory.
 `LoadedProfile::policy` combines portable policy resolution with path protection
 for every contributing source file. Both launch and check use this method, so an
 inherited parent symlink cannot expose a writable policy file outside the config
-directory. Existing deny precedence and ancestor rename protection are unchanged.
+directory. On Linux, missing denies are removed after all source protection has
+been added; the ignored canonical paths are retained for notices and inspection.
 Environment validation is shared between `environment::build` and the checker.
 
 ### Static configuration analysis
 
 `check::analyze` discovers local `*.toml` files in sorted order and always includes
-`default`, or accepts the explicit `-p` selection. Each selected profile is resolved
+`default` and `permissive`, or accepts the explicit `-p` selection. Each selected profile is resolved
 independently; an invalid profile does not prevent checking the others. Invalid
 filenames, unreadable files, missing dependencies, schema errors, and cycles become
 errors. An unresolvable dependency prevents effective-policy checks for that chain.
@@ -182,12 +197,13 @@ scratch storage. Intentional child scalar and assignment overrides are not error
 The checker prints source chains and effective scalar settings, not assignment
 values in semantic diagnostics. It does not enumerate or print the parent process's
 environment. Terminal controls in report text are escaped. Colors require a terminal,
-no `NO_COLOR`, and a TERM other than `dumb`; glyphs and severity labels remain in
+no `NO_COLOR`, and a TERM other than `dumb`, unless `--color always|never`
+overrides the choice; glyphs and severity labels remain in
 redirected output. Errors return status 1, warnings return 0 unless `--strict` is
 used. CLI argument errors retain Clap's status 2.
 
 On macOS/Linux, check validates native rendering and launcher presence. Linux
-also warns about conservative read-only parents for absent denies. On other systems,
+also warns about ignored absent denies (three paths plus a remainder count). On other systems,
 portable configuration analysis works with an unsupported-execution warning.
 It never starts a process or modifies configuration/scratch storage. It cannot
 prove kernel enforcement, verify TLS connectivity or certificate contents, or
@@ -292,13 +308,13 @@ replace `/proc`, `/dev`, and `/sys`; explicit paths inside those trees are rejec
 Closed mode requires basic runtime and remounts the synthetic root read-only.
 
 Existing denies are applied last as inaccessible read-only empty directories or
-files. Nested denies are collapsed. Missing denies make their nearest existing
-writable parent read-only, then rebind its existing allowed children with their
-original access. Those mounts are integrated into the same parent-first order.
-This reserves missing names without host placeholders, at the cost of restricting
-all directory entry changes in that parent. Check and print-policy plan these
-mounts without writing files. Missing grants are omitted or use `--bind-try`;
-launch prepares the configured scratch directory before planning its mounts.
+files. Nested denies are collapsed. Missing denies are ignored at startup and do
+not pin or restrict their parents. The effective Policy records ignored paths for
+the startup/check/show notice; files created later during the run may be accessible
+under other grants. The mount planner also omits any exclusions absent when mounts
+are planned. No host placeholders are created. Check and policy rendering remain
+read-only. Missing grants are omitted or use `--bind-try`; launch prepares the
+configured scratch directory before planning its mounts.
 
 The backend emits a classic BPF seccomp program for x86_64 or aarch64. Other ABIs
 and x32 syscall numbers are rejected. Both modes deny namespace/mount operations,
@@ -434,13 +450,15 @@ at the tested commit and publishes archives/checksums plus `install.sh`.
 The POSIX installer detects OS/architecture, resolves latest or a pinned stable
 version, verifies the downloaded checksum and embedded version, then atomically
 replaces the executable under the requested prefix. It invokes the installed
-binary's `init` command, sharing the CLI's non-overwriting profile creation and
-HOME/XDG config resolution. Initialization errors report a partial installation
+binary's `init` command with the chosen overwrite/versioned mode and shared
+HOME/XDG resolution. Existing shipped profiles and AGENTS.md trigger one prompt
+through `/dev/tty` (stdin may carry the script). Declining or no usable terminal
+selects versioned alternatives; `--overwrite-profiles` bypasses the prompt. Initialization errors report a partial installation
 and a retry command. Progress messages show download, verification, copy, and
 initialization stages; successful installs show terminal-aware color, a box logo,
 config/executable locations, and usage/PATH guidance. It does not install sandbox
 backends. Installer regression tests use the built native executable and temporary
-homes to check config preservation. See [development.md](development.md) for release
+homes to check preservation, replacement, versioned alternatives, and both prompt choices. See [development.md](development.md) for release
 and installer requirements.
 
 `just release-installer` invokes `scripts/release-installer.sh` independently of

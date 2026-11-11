@@ -1,6 +1,5 @@
 //! Linux namespace and mount planning for bubblewrap, backed by a seccomp filter.
-//! Missing denies require read-only parents: creating mountpoints in a host bind
-//! would modify the host filesystem.
+//! Missing denies are ignored at startup; existing exclusions are masked last.
 
 use super::{Backend, SandboxCommand};
 use crate::{
@@ -42,7 +41,7 @@ fn ordered(paths: &BTreeSet<PathBuf>) -> Vec<&PathBuf> {
     paths
 }
 
-/// Canonical grants and exclusions plus parents restricted by absent deny paths.
+/// Canonical grants and existing exclusions for this launch.
 struct Mounts {
     /// Host subtrees exposed read-only unless also covered by a write grant.
     read: BTreeSet<PathBuf>,
@@ -50,38 +49,28 @@ struct Mounts {
     write: BTreeSet<PathBuf>,
     /// Paths masked last; descendants inherit the same exclusion.
     deny: BTreeSet<PathBuf>,
-    /// Existing parents whose entries must be frozen to reserve absent deny names.
-    restricted: BTreeSet<PathBuf>,
 }
 
 impl Mounts {
-    /// Resolve mount targets and find writable parents needing missing-path protection.
+    /// Resolve mount targets and omit absent denies without modifying their parents.
     fn new(policy: &Policy) -> Result<Self> {
-        let mut mounts = Self {
-            read: canonical(&policy.read)?,
-            write: canonical(&policy.write)?,
-            deny: canonical(&policy.deny)?,
-            restricted: BTreeSet::new(),
-        };
-        for deny in &mounts.deny {
-            if deny == Path::new("/") {
+        let mut deny = BTreeSet::new();
+        for path in canonical(&policy.deny)? {
+            if path == Path::new("/") {
                 bail!("bubblewrap cannot deny the filesystem root");
             }
-            if !deny.try_exists()? {
-                let parent = deny
-                    .ancestors()
-                    .skip(1)
-                    .find(|p| p.exists())
-                    .context("missing deny ancestor")?;
-                if mounts.writable(policy, parent) && !covered(parent, &mounts.deny) {
-                    mounts.restricted.insert(parent.into());
-                }
+            if path.try_exists()? {
+                deny.insert(path);
             }
         }
-        Ok(mounts)
+        Ok(Self {
+            read: canonical(&policy.read)?,
+            write: canonical(&policy.write)?,
+            deny,
+        })
     }
 
-    /// Check baseline/grant write access; callers apply deny and parent restrictions.
+    /// Check baseline/grant write access; callers apply denies and ancestor pins.
     fn writable(&self, policy: &Policy, path: &Path) -> bool {
         policy.mode == Mode::Open || covered(path, &self.write)
     }
@@ -90,11 +79,6 @@ impl Mounts {
     fn visible(&self, policy: &Policy, path: &Path) -> bool {
         self.writable(policy, path) || covered(path, &self.read)
     }
-}
-
-/// Exposed to read-only diagnostics; never creates mountpoints or scratch files.
-pub fn restricted_parents(policy: &Policy) -> Result<Vec<PathBuf>> {
-    Ok(Mounts::new(policy)?.restricted.into_iter().collect())
 }
 
 /// Bind a host path at the same sandbox path with the requested write permission.
@@ -194,29 +178,12 @@ fn arguments(
                 .map(Path::to_path_buf),
         );
     }
-    // Reserve absent deny names without creating anything on the host. Existing
-    // allowed children keep their original permissions; directory entry changes
-    // in the parent remain prohibited (including atomic replacement of files).
-    for parent in ordered(&mounts.restricted) {
-        bindings.insert(parent.clone());
-        let mut children = fs::read_dir(parent)?
-            .map(|entry| Ok(entry?.path()))
-            .collect::<Result<Vec<_>>>()?;
-        children.sort();
-        for child in children {
-            let metadata = fs::symlink_metadata(&child)?;
-            if !metadata.file_type().is_symlink() && !covered(&child, &mounts.deny) {
-                bindings.insert(child);
-            }
-        }
-    }
-    // One parent-first order for grants, pins, and restricted parents prevents
-    // a later parent bind from undoing child write grants or rename protection.
+    // Parent-first bindings prevent a later parent mount from undoing a child grant.
     for path in ordered(&bindings) {
         if covered(path, &mounts.deny) {
             continue;
         }
-        let writable = mounts.writable(policy, path) && !mounts.restricted.contains(path);
+        let writable = mounts.writable(policy, path);
         if path.try_exists()? {
             bind(&mut args, path, writable);
         } else if writable {
@@ -305,7 +272,11 @@ impl Backend for Bubblewrap {
             EXECUTABLE
         );
         for arg in args {
-            output.push(' ');
+            output.push_str(if arg.to_string_lossy().starts_with("--") {
+                "\n  "
+            } else {
+                " "
+            });
             output.push('\'');
             output.push_str(&arg.to_string_lossy().replace('\'', "'\\''"));
             output.push('\'');
