@@ -2,6 +2,9 @@
 /target/
 /dist/
 
+# Local security review output.
+/security-report.md
+
 # Keep Cargo.lock tracked: lilbox is an application.
 
 # Rustfmt backups and profiling output.
