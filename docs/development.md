@@ -84,7 +84,9 @@ just bump 0.4.0            # alternatively, choose a version (v0.4.0 also works)
 ```
 
 [`scripts/version.py`](../scripts/version.py) updates `Cargo.toml`, the root
-package in `Cargo.lock`, README version references, and `CHANGELOG.md`. An
+package in `Cargo.lock`, README version references, and `CHANGELOG.md`. The README
+version heading and pinned installer example are required; a startup-banner
+example is updated and checked only when present. An
 `Unreleased` heading becomes a dated release entry; otherwise, commit subjects
 since the latest available ancestor release tag seed a new entry. Review these
 generated notes before publishing. Dependency versions and old changelog entries

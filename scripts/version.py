@@ -122,14 +122,21 @@ def available(version, reserved):
 
 
 def readme_version(text, current, target):
-    """Replace each expected public version example exactly once or reject drift."""
-    patterns = [r'(Version \*\*)' + re.escape(current) + r'(\*\*)',
-                r'(--version )' + re.escape(current) + r'(?=\s|$)',
-                r'(?m)^(  lilbox )' + re.escape(current) + r'$']
-    for pattern in patterns:
-        text, count = re.subn(pattern, lambda match: match[0].replace(current, target), text)
-        if count != 1:
-            raise ReleaseError('README version references are missing or inconsistent; update them before bumping.')
+    """Update required version references and validate any optional banner example."""
+    patterns = [
+        ('version heading', r'(Version \*\*)([^*\s]+)(\*\*)', True),
+        ('pinned installer example', r'(--version )(\S+)', True),
+        ('startup banner example', r'(?m)^(  lilbox )([0-9]\S*)$', False),
+    ]
+    for label, pattern, required in patterns:
+        matches = list(re.finditer(pattern, text))
+        if not matches and not required:
+            continue
+        if len(matches) != 1 or matches[0][2] != current:
+            raise ReleaseError(f'README {label} must contain exactly one version reference matching {current}.')
+        # Replace only the captured version; historical prose is not release metadata.
+        match = matches[0]
+        text = text[:match.start(2)] + target + text[match.end(2):]
     return text
 
 

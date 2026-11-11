@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import pty
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -529,6 +530,16 @@ else:
         self.assertFalse(self.log.exists())
 
 
+class CheckoutMetadataTest(unittest.TestCase):
+    """Catch drift in the real checkout without querying GitHub or dispatching releases."""
+
+    # Fixture-only tests cannot detect a README layout change in the actual repository.
+    def test_current_release_metadata_is_consistent(self):
+        version_script = runpy.run_path(str(ROOT / 'scripts/version.py'))
+        current, data = version_script['sources']()
+        version_script['check_sources'](current, current, data)
+
+
 class VersionFlowTest(unittest.TestCase):
     """Use real temporary Git repositories; only GitHub API/dispatch is stubbed."""
     # Create real local Git history/remotes and stub only GitHub history and dispatch.
@@ -690,6 +701,33 @@ else:
         readme.write_text(readme.read_text().replace('Version **0.3.0**', 'Version **0.1.0**'))
         self.commit('Inconsistent docs fixture')
         self.assert_rejected(self.invoke('bump'), self.snapshot())
+
+    # Removing a presentation-only banner must not block version preparation or release.
+    def test_readme_without_banner_can_bump_and_release(self):
+        readme = self.repo / 'README.md'
+        readme.write_text(readme.read_text().replace('  lilbox 0.3.0\n', ''))
+        self.commit('Remove startup banner example')
+        result = self.invoke('bump')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('  lilbox ', readme.read_text())
+        self.commit('Prepare next patch')
+        self.git('push', 'origin', 'main')
+        result = self.invoke('release')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('version=0.3.1', self.log.read_text())
+
+    # Optional banners still need to match, and a duplicate cannot hide a stale version.
+    def test_stale_or_duplicate_banner_is_rejected(self):
+        readme = self.repo / 'README.md'
+        original = readme.read_text()
+        for contents in (original.replace('  lilbox 0.3.0', '  lilbox 0.2.0'),
+                         original + '  lilbox 0.2.0\n'):
+            with self.subTest(contents=contents):
+                readme.write_text(contents)
+                self.commit('Invalid banner fixture')
+                result = self.invoke('bump')
+                self.assert_rejected(result, self.snapshot())
+                self.assertIn('README startup banner example', result.stderr)
 
     # Releasing the prepared version dispatches precisely the pushed HEAD and version.
     def test_release_current_dispatches_exact_commit_without_mutation(self):
