@@ -4,8 +4,7 @@
 
 A small wrapper for running coding agents and untrusted commands inside an OS
 sandbox. The default profile blocks common sensitive paths such as `~/.ssh` and
-`~/.aws`, and scrubs sensitive environment variables such as API keys. On Linux,
-only deny paths that exist at startup are protected.
+`~/.aws`, and scrubs sensitive environment variables such as API keys.
 
 Think of it as an *outer sandbox* which serves as a defense in depth along with
 other isolation mechanisms, particularly those bundled with agent harnesses.
@@ -38,33 +37,17 @@ Choose an alternate installation prefix or a specific release:
 ```sh
 curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
 ```
+Pass`--overwrite-profiles` to replace profiles explicitly.
 
-The installer reports download, checksum, copy, and initialization progress, then
-shows config paths and quick-start commands. It asks before replacing existing
-shipped profiles and the agent guide. Declining, or running without a terminal,
-writes versioned alternatives such as `default.toml.0.4.0`. Pass
-`--overwrite-profiles` to replace them explicitly. Color follows terminal output and respects
-`NO_COLOR` and `TERM=dumb`.
-
-Linux needs `/usr/bin/bwrap` (bubblewrap 0.6.3+), permitted user namespaces,
-seccomp, and public CA certificates; macOS needs `/usr/bin/sandbox-exec`.
-Install your coding agent separately. See [installer details](docs/development.md#binary-installer)
-for requirements and [installer publication](docs/development.md#publish-the-hosted-installer)
-for `just release-installer`.
-
-To build from source, install Rust/Cargo 1.85+ and
-[Just](https://github.com/casey/just), then run `just build` and `just install`.
+Run your command inside lilbox.
 
 ```sh
-lilbox                        # help, including the embedded version
-lilbox -v                     # version (also -V and --version)
 lilbox codex                  # launch Codex from PATH
 lilbox claude                 # launch Claude from PATH
 lilbox shell                  # interactive shell, user startup files disabled
-lilbox exec cargo test        # run any executable
 ```
 
-No configuration is required. The default allows broad filesystem and network
+No configuration is required. The default profile allows broad filesystem and network
 access while blocking common credential/private paths and scrubbing sensitive
 environment variables. It is **not workspace-only**: ordinary files outside the
 current directory remain writable, subject to the Linux restrictions below.
@@ -72,7 +55,7 @@ current directory remain writable, subject to the Linux restrictions below.
 To configure profiles:
 
 ```sh
-lilbox init                   # install missing profiles and AGENTS.md; preserve existing files
+lilbox init                   # install missing profiles and AGENTS.md
 lilbox -p isolated exec /bin/sh -c 'echo hello; ls'
 lilbox -p isolated shell
 lilbox policy         # inspect the exact native policy
@@ -85,6 +68,19 @@ and denies network access. Before running an agent in it, explicitly add its
 installation, state directories, and authentication needs and enable its network
 access. `lilbox -p isolated codex` then selects that configured profile.
 
+### Configure profiles with your coding agent
+
+You can tell your coding agent, outside the sandbox, to read `~/.config/lilbox/AGENTS.md` to learn how to customize lilbox.
+
+```
+codex> Read ~/.config/lilbox/AGENTS.md
+...
+codex> Create a new profile called "pi" with sane defaults for the "path/to/foobar" project.
+...
+
+# In your shell, start the Pi agent with the "pi" profile
+bash$ lilbox -p pi pi
+```
 ## Commands
 
 ```text
@@ -105,16 +101,6 @@ lilbox [OPTIONS] <PROGRAM> [ARGS...]
 | `lilbox [-p NAME] profile show [--all] [--origins]` | Explain effective access and inheritance. |
 | `lilbox [-p NAME] profile cani OPERATION [ARG]` | Ask what the policy permits without performing the operation. |
 
-The version from `Cargo.toml` is baked into the binary and appears in help and
-`-v` / `--version` output (`-V` also works). Before launching a command, lilbox
-prints a compact summary to stderr:
-
-```text
-  lilbox 0.4.0
-  ├ profile  default
-  └ command  cargo test
-```
-
 Put lilbox options **before** the command; subsequent arguments go to the program.
 Use an explicit shell for pipelines:
 
@@ -123,9 +109,6 @@ lilbox --config-dir ./my-profiles -p review exec git diff
 lilbox exec /bin/sh -c 'find . -name "*.rs" | wc -l'
 ```
 
-`shell` uses `$SHELL`, falling back to `/bin/zsh` on macOS or `/bin/sh` on Linux.
-Linux preserves terminal I/O but runs in a new session without host terminal job
-control; shells may print a job-control warning.
 See [shell startup behavior](docs/design.md#interactive-shells) for flags and limits.
 
 ## Profiles
@@ -146,15 +129,7 @@ your personal overrides; existing standalone default profiles continue to work.
 | [`default`](profiles/default.toml) | Inherits permissive; add personal overrides here. | Inherited |
 | [`isolated`](profiles/isolated.toml) | System reads, current-directory writes, and scratch storage. | Denied |
 
-**Linux:** denied paths that do not exist at startup are ignored for that run.
-Their parents stay writable, and no placeholders are created. A console notice
-lists at most three ignored paths and the remaining count. A missing `.env` can
-therefore be created/read during that run if the surrounding directory is granted.
-Existing denies stay protected. See [Linux permissions](docs/profiles.md#missing-denied-paths).
-
-Tell your coding agent, outside the sandbox, to read `~/.config/lilbox/AGENTS.md`
-to learn how to customize lilbox. `init` installs this [guide](docs/LILBOX-AGENTS.md); startup and init report
-the actual path when you use XDG or `--config-dir` overrides.
+**Linux:** denied paths that do not exist at startup are ignored for that run. Existing denies stay protected. See [Linux permissions](docs/profiles.md#missing-denied-paths).
 
 ### Customize a profile
 
@@ -202,6 +177,9 @@ validate configuration and precedence, not actual kernel enforcement or connecti
 See [check diagnostics](docs/design.md#static-configuration-analysis).
 
 ## Documentation
+
+To build from source, install Rust/Cargo 1.85+ and
+[Just](https://github.com/casey/just), then run `just build` and `just install`.
 
 | Guide | Topics |
 | --- | --- |
