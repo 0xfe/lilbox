@@ -300,9 +300,6 @@ pub fn run(
             }
         }
     }
-    println!(
-        "The startup probe uses embedded isolated policy; it does not certify every operation or the selected program's dependencies."
-    );
     Ok(passed)
 }
 

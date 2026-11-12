@@ -5,10 +5,11 @@ Public URL: **https://mo.town/lilbox/**. Storage destination:
 
 `index.html` is the entire page, with embedded CSS and JavaScript. There is no
 framework, package manager, build step, analytics, or external JavaScript.
-Cousine is loaded from Google Fonts, matching mo.town, with local monospace
-fallbacks. The icon is a local PNG with transparency. Installation and navigation
-still work without JavaScript; JavaScript only adds the copy button. When clipboard
-access is unavailable, the button selects the command for manual copying.
+The page uses a native system sans-serif font. Code and the lilbox name use Cousine from Google
+Fonts, with local monospace fallbacks. The icon is a local PNG with transparency.
+Installation and navigation still work without JavaScript; JavaScript adds copy
+buttons for the install command, configuration prompt, and run command. When clipboard access is unavailable, each button selects its text
+for manual copying.
 
 ## Serve locally
 
@@ -51,9 +52,10 @@ deployment tests are offline and never publish.
 
 Edit text, styles, and the small copy handler directly in `index.html`. Keep the
 `lilbox` spelling and the install URL `https://mo.town/lilbox/install.sh`. The
-isolated-agent example requires the profile to be configured for the agent's
-paths, state, credentials, and network needs; the shipped isolated profile is
-closed and offline. Avoid implying that the default profile is workspace-only.
+install card is followed by the product description and a combined Configure
+and Run card for agent-assisted profile creation and launching Claude Code. Keep the configuration prompt copyable as plain text.
+The “Why outer sandboxes?” section explains the outer sandbox and its role alongside other
+isolation mechanisms. Avoid implying that the default profile is workspace-only.
 
 Images use the first 12 hex characters of their SHA-256 digest in the filename.
 When replacing an image, give it a new fingerprinted name and update its references

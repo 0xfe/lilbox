@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4 — 2026-11-12
+
+- Remove repetitive footer explanations from permission queries and doctor output.
+- Refresh the website with a combined configuration/run guide, copyable agent
+  prompt and command, clearer typography, and an outer-sandbox explanation.
+- Restructure the development guide with task-focused sections, command examples,
+  tables, and concise testing, release, installer, and deployment instructions.
+
 ## 0.4.3 — 2026-11-12
 
 - Keep the coding-agent guide prompt in help only; ordinary launches print only

@@ -280,9 +280,6 @@ fn run() -> Result<()> {
             for line in &answer.advice {
                 println!("{}", display::safe(line));
             }
-            println!(
-                "Static policy answer; host permissions, runtime dependencies, and native operation rules still apply."
-            );
             if answer.allowed != Some(true) {
                 std::process::exit(1);
             }
