@@ -72,6 +72,7 @@ Existing installed files retain their behavior until explicitly replaced.
   Choose `runtime.temp_dir="private"` when runs must not share scratch.
 - Keep profile files and parent directories owned by the user/root and not
   group/other writable. Do not add `--allow-shared-profiles` just to silence errors.
+- If creating a .lilbox directory, then add it to .gitignore unless the user specifies otherwise.
 
 ```toml
 version = 1

@@ -15,14 +15,6 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-You can configure lilbox with your favourite coding agent using a prompt like:
-
-
-```
-Read ~/.config/lilbox/AGENTS.md and then create a new profile called "foobar" for
-the project in this directory with sane secure defaults.
-```
-
 Version **0.4.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
 through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
 refuse execution.
@@ -46,51 +38,23 @@ Choose an alternate installation prefix or a specific release:
 ```sh
 curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
 ```
-The installer asks separately before replacing each existing profile or guide.
-Declining preserves it and writes a versioned alternative. Pass `--overwrite-profiles` to replace profiles explicitly.
 
-Run your command inside lilbox.
+Then create a new profile for your project with  your favourite coding agent using a prompt like:
+
+
+```
+Read ~/.config/lilbox/AGENTS.md and create a new lilbox profile for this git repo with sane secure defaults, to work with the pi coding agent.
+```
+
+Now you can run your agent or command inside lilbox.
+
 
 ```sh
-lilbox codex                  # launch Codex from PATH
-lilbox claude                 # launch Claude from PATH
-lilbox shell                  # interactive shell, user startup files disabled
+lilbox pi                     # launch pi with the profile in .libbox/profile.toml
+lilbox -p pi pi               # launch pi with the profile in ~/.config/lilbox/pi.toml
+lilbox [-p <profile>] shell   # launch a shell with the given profile
 ```
 
-No configuration is required. The default extends the closed `isolated` profile
-with online coding permissions. Use `-p permissive` for broad host access.
-If `.lilbox/profile.toml` exists in the current directory, it becomes the default;
-`-p NAME` overrides it. Startup displays the selected profile and its path.
-
-To configure profiles:
-
-```sh
-lilbox init                   # install missing profiles and AGENTS.md
-lilbox -p isolated exec /bin/sh -c 'echo hello; ls'
-lilbox -p isolated shell
-lilbox policy         # inspect the exact native policy
-lilbox check                  # analyze all profiles and inheritance
-lilbox -p isolated check      # analyze one profile and its parents
-```
-
-The `isolated` example starts closed, grants system tools and the current directory,
-and denies network access. Before running an agent in it, explicitly add its
-installation, state directories, and authentication needs and enable its network
-access. `lilbox -p isolated codex` then selects that configured profile.
-
-### Configure profiles with your coding agent
-
-You can tell your coding agent, outside the sandbox, to read `~/.config/lilbox/AGENTS.md` to learn how to customize lilbox.
-
-```
-codex> Read ~/.config/lilbox/AGENTS.md
-...
-codex> Create a new profile called "pi" with sane defaults for the "path/to/foobar" project.
-...
-
-# In your shell, start the Pi agent with the "pi" profile
-bash$ lilbox -p pi pi
-```
 ## Commands
 
 ```text
@@ -123,15 +87,21 @@ See [shell startup behavior](docs/design.md#interactive-shells) for flags and li
 
 ## Profiles
 
-Profile lookup, in priority order:
+Profile selection, in priority order:
 
-1. `--config-dir DIR`
-2. `$XDG_CONFIG_HOME/lilbox`
-3. `~/.config/lilbox`
+| Priority | Profile |
+| --- | --- |
+| 1 | `-p NAME` selects a named global profile. |
+| 2 | `.lilbox/profile.toml` in the current working directory, if present. |
+| 3 | Global `default.toml`, or the embedded default. |
+
+Use `lilbox [-p <profile>] profile show` to inspect a profile.
+
+The global profile directory is selected by `--config-dir DIR`, then
+`$XDG_CONFIG_HOME/lilbox`, then `~/.config/lilbox`.
 
 Each global profile is a `NAME.toml` file. `default`, `isolated`, and `permissive`
-have embedded fallbacks. Initialization installs the native platform's defaults.
-Existing files are preserved until you explicitly replace them.
+have embedded fallbacks.
 
 | Starter | Filesystem | Network |
 | --- | --- | --- |
@@ -147,7 +117,8 @@ and no group/other write permission; see [profile integrity](docs/profiles.md#pr
 
 ### Customize a profile
 
-Create `~/.config/lilbox/work.toml`, or `.lilbox/profile.toml` for this project:
+Edit `.lilbox/profile.toml` for project-specific permissions, or one of the global
+profiles in `~/.config/lilbox`.
 
 ```toml
 version = 1
@@ -161,11 +132,6 @@ keep = ["ANTHROPIC_API_KEY"]  # explicitly pass a required credential
 drop = ["MY_COMPANY_*_TOKEN"]
 ```
 
-```sh
-lilbox -p work check
-lilbox -p work claude
-```
-
 - Paths support absolute paths, `~/`, `${HOME}`, `${CWD}`, and paths relative to
   the launch directory. No globs or `..` components.
 - Environment globs support `*` anywhere and `?` for one character, ignoring case.
@@ -173,31 +139,28 @@ lilbox -p work claude
 - Inheritance appends lists and overrides explicit scalar values. Changing `mode`
   alone does not reset inherited network or environment settings.
 
-For a closed baseline, extend `isolated`. Add the
-agent's executable, libraries, state, and authentication needs; enable networking
-if needed. See the [example gallery](examples/README.md) and
-[profile reference](docs/profiles.md) for complete configurations and merge rules.
+See the [example gallery](examples/README.md) and [profile reference](docs/profiles.md) for complete configurations and merge rules.
 
 ### Temporary files
 
 The default uses `.lilbox/tmp` when `.lilbox/` exists. Otherwise it uses private
-storage: a per-run Linux tmpfs or a fresh mode-0700 macOS directory.
-`permissive` uses system temp. Override with `[runtime] temp_dir = "private"`,
-`"system"`, or a directory path. See [storage and retention](docs/profiles.md#temporary-storage).
+storage: a per-run Linux tmpfs or a fresh mode-0700 macOS directory. Override with `[runtime] temp_dir = "private"`, "system"`, or a directory path. See [storage and retention](docs/profiles.md#temporary-storage).
 
-### Check a profile
+### Explain access
+
+Sometimes it's difficult to reason about policy rules. You can use the `cani` subcommand
+to test specific behavior.
 
 ```sh
-lilbox check
-lilbox -p work check --strict
-lilbox check --secrets        # optional filename-only project inventory
+lilbox profile show --origins       # sample lists and label inherited settings
+lilbox profile show --all --origins # expand every list
+lilbox -p pi profile cani read-path ~/.ssh/id_ed25519
+lilbox profile cani write-path ./output.txt
+lilbox profile cani execute-path /usr/bin/python3
+lilbox profile cani read-env ANTHROPIC_API_KEY
+lilbox profile cani network
+lilbox --color always policy       # auto (default), always, or never
 ```
-
-Run checks from the intended project directory so relative paths resolve correctly.
-Checks are read-only: errors fail, and `--strict` also fails on warnings. They
-validate configuration and precedence, not actual kernel enforcement or connectivity.
-See [check diagnostics](docs/design.md#static-configuration-analysis).
-
 ## Documentation
 
 To build from source, install Rust/Cargo 1.85+ and
@@ -212,24 +175,3 @@ To build from source, install Rust/Cargo 1.85+ and
 | [Example profiles](examples/README.md) | Standalone, inherited, offline, and online configurations. |
 | [Contributor instructions](AGENTS.md) | Repository conventions and security constraints. |
 
-### Explain access
-
-```sh
-lilbox profile show --origins       # sample lists and label inherited settings
-lilbox profile show --all --origins # expand every list
-lilbox profile cani read-path ~/.ssh/id_ed25519
-lilbox profile cani write-path ./output.txt
-lilbox profile cani execute-path /usr/bin/python3
-lilbox profile cani read-env ANTHROPIC_API_KEY
-lilbox profile cani network
-lilbox --color always policy       # auto (default), always, or never
-```
-
-`show` displays effective filesystem, environment, and runtime rules; assignment
-values remain hidden. `--origins` names the profile contributing each scalar/list
-item. `cani` returns 0 for allowed and 1 for denied/indeterminate; it is static
-policy analysis, not a host access or connectivity probe. Path writes mean content
-writes/ordinary creation, not renames or atomic replacement. Special runtime paths
-may be indeterminate; host permissions, file existence, and executable dependencies
-still matter. Environment queries test whether a name would be admitted if present.
-The old `--print-policy` flag has been replaced by `policy` in 0.4.0.
