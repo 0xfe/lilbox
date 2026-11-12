@@ -21,7 +21,7 @@ use std::{
     disable_version_flag = true,
     before_help = concat!("lilbox ", env!("CARGO_PKG_VERSION")),
     about = "Run coding agents and commands in a configurable OS sandbox",
-    after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox policy\n\nRun `lilbox init` to create profiles and an agent guide.\nTell your coding agent to read ~/.config/lilbox/AGENTS.md to customize lilbox."
+    after_help = "Examples:\n  lilbox codex\n  lilbox claude --help\n  lilbox shell\n  lilbox exec cargo test\n  lilbox -p isolated exec /bin/sh\n  lilbox policy\n\nThe installer provides starter profiles and an agent guide.\nTell your coding agent to read ~/.config/lilbox/AGENTS.md to customize lilbox."
 )]
 struct Cli {
     /// Print version
@@ -47,18 +47,6 @@ struct Cli {
 // Built-in actions coexist with external subcommands such as `lilbox codex`.
 #[derive(Subcommand, Debug)]
 enum Action {
-    /// Install missing starter profiles and the AGENTS.md customization guide
-    Init {
-        /// Replace existing shipped regular files (refuse symlinks)
-        #[arg(long, conflicts_with = "versioned")]
-        overwrite_profiles: bool,
-        /// Preserve existing files and write version-suffixed alternatives
-        #[arg(long)]
-        versioned: bool,
-        /// Initialize only this shipped filename (repeat for multiple files)
-        #[arg(long = "file", value_name = "NAME")]
-        files: Vec<String>,
-    },
     /// Show the effective native system policy with indentation and colors
     Policy,
     /// Inspect effective permissions, inheritance, and configuration
@@ -139,7 +127,7 @@ fn run() -> Result<()> {
         println!();
         return Ok(());
     }
-    // Resolve configuration once so init, check, and launch use the same lookup.
+    // Resolve configuration once for checking and launching.
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME must be set")?);
     if !home.is_absolute() {
         bail!("HOME must be an absolute path");
@@ -157,30 +145,6 @@ fn run() -> Result<()> {
             None => home.join(".config/lilbox"),
         },
     };
-    // Setup and static analysis do not require a functioning sandbox backend.
-    if let Some(Action::Init {
-        overwrite_profiles,
-        versioned,
-        files,
-    }) = cli.command
-    {
-        let mode = if overwrite_profiles {
-            config::InitMode::Overwrite
-        } else if versioned {
-            config::InitMode::Versioned
-        } else {
-            config::InitMode::Preserve
-        };
-        let created = config::init_files(&config_directory, mode, &files)?;
-        if created.is_empty() {
-            println!("Existing profiles and guide preserved; no files written.");
-        }
-        for path in created {
-            println!("Wrote {}", display::safe(&path));
-        }
-        println!("{}", guide_note(&config_directory));
-        return Ok(());
-    }
     let mut paths = ContextPaths {
         // Replaced by temporary::select before policy/environment construction.
         temporary: home.join(".cache/lilbox/private/run-PENDING"),
@@ -304,7 +268,7 @@ fn run() -> Result<()> {
             command.extend(args);
             command
         }
-        Action::Init { .. } | Action::Check { .. } | Action::Policy | Action::Profile { .. } => {
+        Action::Check { .. } | Action::Policy | Action::Profile { .. } => {
             unreachable!()
         }
     };

@@ -18,7 +18,7 @@ is a historical implementation/verification record.
 
 - `src/main.rs`: CLI, configuration lookup, launch orchestration.
 - `src/config.rs`: strict TOML schema, inheritance resolution, dependency protection,
-  provenance tracking, and explicit preserve/versioned/overwrite initialization.
+  and provenance tracking.
 - `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
 - `src/discovery.rs`: optional bounded filename-only project-secret inventory.
@@ -63,13 +63,15 @@ just install                  # writes ~/.local/bin/lilbox
 just install /custom/prefix    # writes PREFIX/bin/lilbox
 ```
 
-`lilbox init` writes missing default/permissive/isolated profiles and AGENTS.md.
-Ordinary init preserves existing files; `--versioned` writes inactive versioned
-alternatives and `--overwrite-profiles` explicitly replaces regular shipped files.
+The installer copies missing shipped profiles and AGENTS.md from the verified
+release archive. Existing files get individual overwrite prompts; decline/no
+terminal writes inactive versioned alternatives. `--overwrite-profiles` explicitly
+replaces regular shipped files. Custom named profiles are preserved.
 Default inherits isolated; all three profiles have embedded fallbacks.
-`profiles/macos/` and `profiles/linux/` contain the native closed starters; init
-selects them at compile time. CWD/.lilbox/profile.toml overrides default unless -p
-is set. Prefer temporary homes/config directories for tests;
+`profiles/macos/` and `profiles/linux/` contain the native closed starters. The
+binary embeds its native fallbacks; the installer copies the matching platform
+files from the archive. CWD/.lilbox/profile.toml overrides default unless -p is set.
+Prefer temporary homes/config directories for tests;
 do not modify real credentials or user profiles as test fixtures.
 
 ## Testing
@@ -152,7 +154,7 @@ just release 0.4.0                   # prepare if newer; rerun after manual comm
 `scripts/release.sh` supports ARM64 and x86_64 macOS/Linux (GNU or musl on Linux), builds with locked
 dependencies, and writes versioned archives/checksums in `dist/`. Archives include
 the executable, README, license, changelog, `install.sh`, profiles, `examples/`, and `docs/`
-(including LILBOX-AGENTS.md, installed by init as config AGENTS.md). Verify the
+(including LILBOX-AGENTS.md, installed as config AGENTS.md). Verify the
 SHA-256 sidecar from the archive directory and smoke-test the extracted executable.
 `just package` is local: it does not sign, notarize, tag, or publish a release.
 `just release [VERSION]` prepares a newer optional version and stops; otherwise,
@@ -167,12 +169,13 @@ never publishes. Keep the shared verification workflow and installer target mapp
 aligned. Test installer/request scripts offline with `just test-release`; never
 publish a release merely to test automation.
 Installer tests build and install the native executable into temporary homes and
-prefixes, covering `init` without clobbering existing configs, terminal output,
-and failure recovery. The installer asks via /dev/tty before overwriting existing
-each shipped profile/guide separately, preserves versioned alternatives on decline/no terminal,
-and accepts --overwrite-profiles for explicit replacement. It initializes after
-replacing the executable; initialization failure must report a partial install and exit
-nonzero. Keep CI's `scripts/test_release.py --binary PATH` pointing at its native
+prefixes, covering profile installation without clobbering existing configs,
+terminal output, and failure recovery. The installer asks via /dev/tty before
+overwriting each shipped profile/guide separately, preserves versioned alternatives
+on decline/no terminal, and accepts --overwrite-profiles for explicit replacement.
+It copies profiles after replacing the executable; profile installation failure
+must report a partial install and exit nonzero. Keep CI's
+`scripts/test_release.py --binary PATH` pointing at its native
 target binary, and never use real user configs as installer fixtures.
 `just release-installer` separately publishes the local `install.sh` using
 authenticated gcloud to `gs://muthanna.com/lilbox/install.sh`, with public-read

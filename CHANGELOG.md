@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2 — 2026-11-12
+
+- Move profile installation into the installer. It copies the native profiles and
+  agent guide directly from the checksum-verified archive; the CLI no longer
+  provides a configuration-writing command.
+- Preserve individual overwrite prompts, versioned alternatives, private file
+  permissions, symlink protections, and support for older archive layouts.
+- Simplify the completion screen to the installation paths, PATH reminder, and
+  one coding-agent prompt. Remove the repeated guide messages.
+- Update documentation and verify the packaged installer with offline downloads
+  before running sandbox smoke tests.
+
 ## 0.4.1 — 2026-11-12
 
 - Select `.lilbox/profile.toml` automatically from the working directory, unless
@@ -29,7 +41,7 @@
 - Move the open baseline into `permissive`; the shipped `default` inherits it.
   Both have embedded fallbacks. Existing standalone defaults remain valid.
 - Bundle the agent customization guide in docs and install it as config AGENTS.md.
-  Launches and init report the guide path. Installer upgrades prompt before
+  Launches report the guide path. Installer upgrades prompt before
   replacing shipped profiles/guide; decline/no terminal writes versioned
   alternatives. `--overwrite-profiles` explicitly opts into replacement.
 - Expand source comments, profile documentation, and regression coverage.
@@ -44,7 +56,7 @@
 - Initialize missing starter profiles after binary installation without
   overwriting existing configs or symlinks. Show a colored box logo, config and
   executable locations, PATH setup, quick-start commands, and recovery guidance
-  when initialization fails.
+  when profile installation fails.
 - Test installation with real native binaries, including config preservation,
   custom config locations, failure recovery, terminal colors, and PATH quoting.
 
@@ -94,5 +106,5 @@
 - Direct agent, shell, and command launch with native exit/signal behavior.
 - Open and closed profiles, credential path protection, environment scrubbing,
   private temporary storage, and network allow/deny modes.
-- Strict versioned TOML configuration and non-overwriting profile initialization.
+- Strict versioned TOML configuration and non-overwriting profile installation.
 - Portable tests, macOS enforcement tests, Just recipes, CI, and release archives.

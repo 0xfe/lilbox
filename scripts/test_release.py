@@ -23,7 +23,7 @@ import unittest
 ROOT = Path(__file__).resolve().parent.parent
 # Fixed fake release version, independent of the current Cargo package version.
 VERSION = '0.3.0'
-# Populated by --binary for tests that exercise the real install/init behavior.
+# Populated by --binary for tests that exercise the real installation behavior.
 REAL_BINARY = None
 
 
@@ -51,7 +51,7 @@ class ScriptsTest(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.home), PATH=f'{self.bin}:/usr/bin:/bin',
                         TMPDIR=str(self.root), FIXTURES=str(self.assets), CALL_LOG=str(self.log),
                         FAKE_OS='Linux', FAKE_ARCH='x86_64', FAKE_VERSION=VERSION,
-                        INIT_LOG=str(self.root / 'init.log'), TERM='xterm-256color')
+                        TERM='xterm-256color')
         self.env.pop('XDG_CONFIG_HOME', None)
         self.env.pop('NO_COLOR', None)
         # Independent of the shell's stdin: exercise the actual curl | sh pattern.
@@ -86,7 +86,7 @@ else:
 
     # Build a tiny release archive/checksum, optionally containing invalid executable data.
     def archive(self, target='x86_64-unknown-linux-musl', binary_version=VERSION, symlink=False,
-                content=None, release_version=VERSION):
+                content=None, release_version=VERSION, layout='native', omit=None, profile_symlink=None):
         name = f'lilbox-{release_version}-{target}'
         archive = self.assets / f'{name}.tar.gz'
         with tarfile.open(archive, 'w:gz') as bundle:
@@ -101,14 +101,33 @@ else:
                     content = f'''#!/bin/sh
 case "$1" in
     --version) printf 'lilbox {binary_version}\\n' ;;
-    init)
-        printf '%s\\n' "$0" >> "$INIT_LOG"
-        [ "${{FAIL_INIT:-0}}" = 0 ] || exit 1 ;;
     *) exit 2 ;;
 esac
 '''.encode()
                 member.size = len(content)
                 bundle.addfile(member, io.BytesIO(content))
+            if layout == 'native':
+                files = [(f'profiles/{platform}/{name}', ROOT / 'profiles' / platform / name)
+                         for platform in ('macos', 'linux') for name in ('default.toml', 'isolated.toml')]
+                files += [('profiles/permissive.toml', ROOT / 'profiles/permissive.toml'),
+                          ('docs/LILBOX-AGENTS.md', ROOT / 'docs/LILBOX-AGENTS.md')]
+            else:
+                platform = 'macos' if 'apple' in target else 'linux'
+                files = [(f'profiles/{name}', ROOT / 'profiles' / platform / name)
+                         for name in ('default.toml', 'isolated.toml')]
+            for name, source in files:
+                if name == omit:
+                    continue
+                member = tarfile.TarInfo(f'lilbox-{release_version}-{target}/{name}')
+                member.mode = 0o644
+                if name == profile_symlink:
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = '/etc/passwd'
+                    bundle.addfile(member)
+                else:
+                    data = source.read_bytes()
+                    member.size = len(data)
+                    bundle.addfile(member, io.BytesIO(data))
         Path(str(archive) + '.sha256').write_text(
             hashlib.sha256(archive.read_bytes()).hexdigest() + f'  {archive.name}\n')
         return archive
@@ -126,7 +145,11 @@ esac
     # Package the supplied native binary using its actual embedded version.
     def real_archive(self):
         version = subprocess.check_output([REAL_BINARY, '--version'], text=True).strip().removeprefix('lilbox ')
-        self.archive(content=REAL_BINARY.read_bytes(), release_version=version)
+        self.env['FAKE_OS'] = 'Darwin' if sys.platform == 'darwin' else 'Linux'
+        arch = 'aarch64' if os.uname().machine in ('arm64', 'aarch64') else 'x86_64'
+        self.env['FAKE_ARCH'] = arch
+        suffix = 'apple-darwin' if sys.platform == 'darwin' else 'unknown-linux-musl'
+        self.archive(target=f'{arch}-{suffix}', content=REAL_BINARY.read_bytes(), release_version=version)
         return version
 
     # Capture terminal stdout while keeping installer input piped and stderr separate.
@@ -176,7 +199,7 @@ esac
             with self.subTest(os=os_name, arch=arch):
                 self.env.update(FAKE_OS=os_name, FAKE_ARCH=arch)
                 self.archive(target)
-                result = self.install('--version', f'v{VERSION}')
+                result = self.install('--version', f'v{VERSION}', '--overwrite-profiles')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 binary = self.prefix / 'bin/lilbox'
                 self.assertEqual(binary.stat().st_mode & 0o777, 0o755)
@@ -184,7 +207,9 @@ esac
                 calls = self.log.read_text()
                 self.assertIn(f'{target}.tar.gz', calls)
                 self.assertNotIn('/releases/latest', calls)
-                self.assertEqual((self.root / 'init.log').read_text().splitlines()[-1], str(binary))
+                platform = 'macos' if 'apple' in target else 'linux'
+                installed = self.home / '.config/lilbox/default.toml'
+                self.assertEqual(installed.read_bytes(), (ROOT / 'profiles' / platform / 'default.toml').read_bytes())
                 self.assertNotIn(b'\x1b', result.stdout)
 
     # Resolve a fake latest redirect and install under the disposable home by default.
@@ -205,7 +230,7 @@ esac
                   'Preparing lilbox', 'Downloading ' + archive.name,
                   'Downloading ' + archive.name + '.sha256', 'Verifying the archive SHA-256 checksum',
                   'Extracting the executable', 'Copying the executable', 'Checking the executable version',
-                  'Installing ' + str(self.prefix), 'Initializing profiles', 'Installed and ready']
+                  'Installing ' + str(self.prefix), 'Installing profiles', 'Installed and ready']
         output = result.stdout.decode()
         positions = [output.index(stage) for stage in stages]
         self.assertEqual(positions, sorted(positions))
@@ -215,7 +240,7 @@ esac
         self.assert_failed(result)
         self.assertIn(b'Verifying the archive', result.stdout)
         for stage in ('Finding the latest stable release', 'Extracting the executable',
-                      'Copying the executable', 'Initializing profiles', 'Installed and ready'):
+                      'Copying the executable', 'Installing profiles', 'Installed and ready'):
             self.assertNotIn(stage.encode(), result.stdout)
 
     # Every pre-replacement failure must keep the old binary and remove staging files.
@@ -239,13 +264,16 @@ esac
                 self.assertEqual(destination.read_text(), 'keep existing binary')
                 self.assertEqual(list(self.root.glob('lilbox-install.*')), [])
                 self.assertEqual(list(destination.parent.glob('.lilbox.*')), [])
-                self.assertFalse((self.root / 'init.log').exists())
+                self.assertFalse((self.home / '.config').exists())
 
     # Reject invalid options and unsupported platforms before invoking the download stub.
     def test_bad_inputs_fail_before_download(self):
         for args in [('--prefix', 'relative'), ('--version', '../../escape'), ('--unknown',), ('--version',)]:
             with self.subTest(args=args):
                 self.assert_failed(self.install(*args))
+        self.env['XDG_CONFIG_HOME'] = 'relative'
+        self.assert_failed(self.install('--version', VERSION))
+        self.env.pop('XDG_CONFIG_HOME')
         for key, value in [('FAKE_OS', 'FreeBSD'), ('FAKE_ARCH', 'riscv64')]:
             prior = self.env[key]
             self.env[key] = value
@@ -271,10 +299,10 @@ esac
         self.assert_failed(self.install('--version', VERSION))
         self.assertEqual(original.read_text(), 'unchanged')
 
-    # Use real init to fill missing profiles while preserving user content, inodes, and times.
-    def test_real_init_fresh_install_and_upgrade_preserve_custom_profiles(self):
+    # Install bundled files to fill missing profiles while preserving user content, inodes, and times.
+    def test_profile_install_fresh_install_and_upgrade_preserve_custom_profiles(self):
         version = self.real_archive()
-        # A pre-existing lilbox in PATH must never handle initialization.
+        # A pre-existing lilbox in PATH must never handle profile installation.
         self.tool('lilbox', '#!/bin/sh\nexit 96\n')
         result = self.install('--version', version)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -291,17 +319,39 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(custom.read_text(), '# Handwritten profile; must survive upgrades.\n')
         self.assertEqual((config / f'default.toml.{version}').read_bytes(), profile_source('default.toml').read_bytes())
+        alternate = config / f'default.toml.{version}'
+        alternate.write_text('reviewed alternative')
+        again = self.install('--version', version)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(alternate.read_text(), 'reviewed alternative')
         self.assertEqual(custom.stat().st_mtime_ns, original.st_mtime_ns)
         self.assertEqual(custom.stat().st_ino, original.st_ino)
         self.assertEqual(extra.read_text(), '# Custom named profile.\n')
         self.assertEqual((config / 'isolated.toml').read_bytes(), profile_source('isolated.toml').read_bytes())
         output = result.stdout.decode()
-        for expected in (str(config), str(self.prefix / 'bin/lilbox'), 'existing files preserved',
-                         'lilbox check', 'lilbox shell', 'lilbox codex', 'export PATH=', '+-------+'):
-            self.assertIn(expected, output)
+        completion = f'''       +-------+
+      /       /|
+     +-------+ |   lilbox {version}
+     |       | +   Installed and ready
+     |       |/
+     +-------+
+
+Executable:  {self.prefix}/bin/lilbox
+Configs:     {config}
+
+Make sure to add {self.prefix}/bin to your PATH.
+
+To get started, prompt your coding agent with:
+
+Read {config}/AGENTS.md and create a new profile for [..this project..] and show me what it does and how to use it.
+'''
+        self.assertEqual(output[output.index('       +-------+'):], completion)
+        self.assertNotIn('Tell your coding agent', output)
+        self.assertIn(f'Wrote {config}/isolated.toml', output)
+        self.assertEqual((config / 'isolated.toml').stat().st_mode & 0o777, 0o600)
 
     # Respect XDG lookup and preserve both valid and dangling profile symlinks.
-    def test_real_init_xdg_directory_and_existing_symlinks_are_preserved(self):
+    def test_profile_install_xdg_directory_and_existing_symlinks_are_preserved(self):
         version = self.real_archive()
         xdg = self.root / 'custom config'
         self.env['XDG_CONFIG_HOME'] = str(xdg)
@@ -321,8 +371,8 @@ esac
         self.assertFalse((self.home / '.config').exists())
         self.assertIn(str(config).encode(), result.stdout)
 
-    # An init failure leaves the installed binary but must report failure and a recovery command.
-    def test_real_init_failure_reports_partial_install_and_recovery(self):
+    # A profile installation failure leaves the installed binary but must report failure and a recovery command.
+    def test_profile_install_failure_reports_partial_install_and_recovery(self):
         version = self.real_archive()
         blocked = self.root / 'not-a-directory'
         blocked.write_text('preserve this file')
@@ -331,8 +381,8 @@ esac
         self.assert_failed(result)
         self.assertEqual(blocked.read_text(), 'preserve this file')
         self.assertTrue((self.prefix / 'bin/lilbox').is_file())
-        self.assertIn(b'profile initialization failed', result.stderr)
-        self.assertIn(b'then retry:', result.stderr)
+        self.assertIn(b'profile installation failed', result.stderr)
+        self.assertIn(b'rerun the installer', result.stderr)
         self.assertNotIn(b'Installed and ready', result.stdout)
         self.assertEqual(list((self.prefix / 'bin').glob('.lilbox.*')), [])
 
@@ -347,28 +397,69 @@ esac
         self.env['TERM'] = 'dumb'
         self.assertNotIn(b'\x1b', self.terminal_install())
 
-    # Execute printed PATH guidance against tricky path characters to verify safe quoting.
-    def test_path_guidance_is_shell_quoted_and_omitted_when_already_present(self):
+    # The closing reminder is plain text, uses the actual prefix, and is always shown.
+    def test_path_guidance_preserves_literal_prefix(self):
         self.archive()
         self.prefix = self.root / "prefix ' with $spaces"
         result = self.install('--version', VERSION)
         self.assertEqual(result.returncode, 0, result.stderr)
-        command = next(line.strip() for line in result.stdout.decode().splitlines() if 'export PATH=' in line)
-        actual = subprocess.check_output(['sh', '-c', command + '\nprintf "%s" "$PATH"'], env=self.env, text=True)
-        self.assertEqual(actual, str(self.prefix / 'bin') + ':' + self.env['PATH'])
-        self.env['PATH'] = actual
-        result = self.install('--version', VERSION)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        reminder = f'Make sure to add {self.prefix}/bin to your PATH.\n'.encode()
+        self.assertIn(reminder, result.stdout)
         self.assertNotIn(b'export PATH=', result.stdout)
-
-    # Pinned pre-0.4 executables must not receive flags their init parser rejects.
-    def test_legacy_pinned_release_uses_original_init(self):
-        self.archive(content=b'#!/bin/sh\ncase "$1" in --version) echo "lilbox 0.3.0" ;; init) [ "$#" = 1 ] ;; *) exit 2 ;; esac\n')
+        self.env['PATH'] = str(self.prefix / 'bin') + ':' + self.env['PATH']
         result = self.install('--version', VERSION)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(reminder, result.stdout)
+
+    # Older archive layouts work without invoking a command in the installed binary.
+    def test_legacy_archive_copies_only_bundled_profiles(self):
+        self.archive(layout='legacy')
         result = self.install('--version', VERSION, '--overwrite-profiles')
-        self.assert_failed(result)
-        self.assertIn(b'requires lilbox 0.4.0', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.home / '.config/lilbox'
+        self.assertEqual(sorted(p.name for p in config.iterdir()), ['default.toml', 'isolated.toml'])
+        self.assertIn(f'/blob/v{VERSION}/docs/profiles.md'.encode(), result.stdout)
+
+    # Invalid release configuration must fail before replacing an installed executable.
+    def test_invalid_bundled_profiles_preserve_existing_binary(self):
+        destination = self.prefix / 'bin/lilbox'
+        destination.parent.mkdir(parents=True)
+        for settings in [{'omit': 'docs/LILBOX-AGENTS.md'},
+                         {'profile_symlink': 'profiles/linux/default.toml'}]:
+            with self.subTest(settings=settings):
+                destination.write_text('existing binary')
+                self.archive(**settings)
+                result = self.install('--version', VERSION)
+                self.assert_failed(result)
+                self.assertEqual(destination.read_text(), 'existing binary')
+                self.assertFalse((self.home / '.config').exists())
+
+    # Explicit replacement cannot follow links or turn a directory into a profile.
+    def test_profile_overwrite_rejects_symlinks_and_directories(self):
+        self.archive()
+        config = self.home / '.config/lilbox'
+        config.mkdir(parents=True)
+        target = config / 'default.toml'
+        original = self.root / 'external.toml'
+        original.write_text('unchanged')
+        for kind in ('symlink', 'dangling', 'directory'):
+            with self.subTest(kind=kind):
+                if kind == 'directory':
+                    target.mkdir()
+                else:
+                    target.symlink_to(original if kind == 'symlink' else self.root / 'absent')
+                result = self.install('--version', VERSION, '--overwrite-profiles')
+                self.assert_failed(result)
+                self.assertIn(b'non-regular file', result.stderr)
+                self.assertEqual(original.read_text(), 'unchanged')
+                self.assertFalse((self.root / 'absent').exists())
+                self.assertEqual(list(config.glob('.lilbox-profile.*')), [])
+                if kind == 'directory':
+                    self.assertEqual(list(target.iterdir()), [])
+                    target.rmdir()
+                else:
+                    self.assertTrue(target.is_symlink())
+                    target.unlink()
 
     # Give the installer a controlling terminal so its /dev/tty prompt is exercised.
     def interactive_install(self, version, reply):
@@ -423,7 +514,9 @@ esac
             self.assertEqual((config / name).read_text(), 'user custom file')
             source = (ROOT / 'docs/LILBOX-AGENTS.md') if name == 'AGENTS.md' else profile_source(name)
             self.assertEqual((config / f'{name}.{version}').read_bytes(), source.read_bytes())
-        self.interactive_install(version, 'yes')
+        output = self.interactive_install(version, 'yes')
+        self.assertNotIn(b'Tell your coding agent', output)
+        self.assertEqual(output.count(b'To get started, prompt your coding agent with:'), 1)
         for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
             source = (ROOT / 'docs/LILBOX-AGENTS.md') if name == 'AGENTS.md' else profile_source(name)
             self.assertEqual((config / name).read_bytes(), source.read_bytes())

@@ -1,6 +1,6 @@
 # Example profiles
 
-These are editable starting points. `lilbox init` installs only the shipped
+These are editable starting points. The installer copies only the shipped
 `default`, `permissive`, and `isolated` profiles plus AGENTS.md; it does not install this gallery.
 
 | Profile | Parent | Effective behavior |

@@ -1,9 +1,9 @@
 #!/bin/sh
-# Download, verify, and atomically replace a native binary, then initialize profiles.
+# Download, verify, and atomically replace a native binary, then install profiles.
 # Usage: curl -fsSL https://mo.town/lilbox/install.sh | sh
 # Keep execution inside a function so a truncated download cannot partially install.
 
-# Print one POSIX-shell literal for copyable recovery and PATH instructions.
+# Print one POSIX-shell literal for copyable recovery instructions.
 shell_quote() {
     printf "'"
     printf '%s' "$1" | sed "s/'/'\\\\''/g"
@@ -15,7 +15,99 @@ log_step() {
     printf '  %s→%s %s\n' "$accent" "$reset" "$*"
 }
 
-# Install only after input/download validation; init failure reports a partial install.
+# Check only exact, fixed member names in the verified release archive.
+archive_has() {
+    grep -Fxq "$name/$1" "$scratch/members"
+}
+
+# Extract a selected regular file into private staging; never unpack the whole archive.
+extract_file() {
+    tar -xzf "$scratch/$name.tar.gz" -C "$scratch" "$name/$1" || return 1
+    if [ ! -f "$scratch/$name/$1" ] || [ -L "$scratch/$name/$1" ]; then
+        printf 'Invalid release file: %s\n' "$1" >&2
+        return 1
+    fi
+}
+
+# Stage the native profiles and guide before replacing the executable. Older
+# archives have shared profiles at their root and may predate the agent guide.
+stage_profiles() {
+    tar -tzf "$scratch/$name.tar.gz" > "$scratch/members" || return 1
+    mkdir "$scratch/profiles" || return 1
+    case "$os" in Darwin) platform=macos ;; Linux) platform=linux ;; esac
+    if archive_has "profiles/$platform/default.toml"; then
+        profile_root=profiles/$platform
+        shipped_files='default.toml permissive.toml isolated.toml AGENTS.md'
+    else
+        profile_root=profiles
+        shipped_files='default.toml isolated.toml'
+        if archive_has profiles/permissive.toml; then shipped_files="$shipped_files permissive.toml"; fi
+        if archive_has docs/LILBOX-AGENTS.md; then shipped_files="$shipped_files AGENTS.md"; fi
+    fi
+    for profile_file in $shipped_files; do
+        case "$profile_file" in
+            AGENTS.md) member=docs/LILBOX-AGENTS.md ;;
+            permissive.toml) member=profiles/permissive.toml ;;
+            *) member=$profile_root/$profile_file ;;
+        esac
+        extract_file "$member" || return 1
+        cp "$scratch/$name/$member" "$scratch/profiles/$profile_file" || return 1
+    done
+}
+
+# Publish complete mode-0600 files on the destination filesystem. Hard-linking
+# reserves a new name without clobbering it; explicit replacement uses rename.
+write_profile() {
+    profile_target=$config_directory/$profile_file
+    replace=$overwrite_profiles
+    if [ -e "$profile_target" ] || [ -L "$profile_target" ]; then
+        if [ "$replace" = false ] && ( : <> /dev/tty ) 2>/dev/null; then
+            printf 'Replace %s? [y/N] ' "$profile_target" > /dev/tty
+            if IFS= read -r reply < /dev/tty; then
+                case "$reply" in y|Y|yes|YES) replace=true ;; esac
+            fi
+        fi
+        if [ "$replace" = false ]; then
+            profile_target=$profile_target.$version
+        fi
+    fi
+    if [ "$replace" = true ]; then
+        if [ -L "$profile_target" ] || { [ -e "$profile_target" ] && [ ! -f "$profile_target" ]; }; then
+            printf 'Refusing to overwrite non-regular file: %s\n' "$profile_target" >&2
+            return 1
+        fi
+    elif [ -e "$profile_target" ] || [ -L "$profile_target" ]; then
+        printf 'Preserved %s\n' "$profile_target"
+        return 0
+    fi
+    profile_pending=$(mktemp "$config_directory/.lilbox-profile.XXXXXXXX") || return 1
+    cp "$scratch/profiles/$profile_file" "$profile_pending" || return 1
+    if [ "$replace" = true ]; then
+        mv -f "$profile_pending" "$profile_target" || return 1
+    elif ! ln "$profile_pending" "$profile_target" 2> "$scratch/profile-error"; then
+        if [ -e "$profile_target" ] || [ -L "$profile_target" ]; then
+            rm -f "$profile_pending"
+            profile_pending=
+            printf 'Preserved %s\n' "$profile_target"
+            return 0
+        fi
+        cat "$scratch/profile-error" >&2
+        return 1
+    fi
+    rm -f "$profile_pending"
+    profile_pending=
+    printf 'Wrote %s\n' "$profile_target"
+}
+
+# Profile failures after binary replacement are reported as partial installations.
+install_profiles() {
+    (umask 077; mkdir -p "$config_directory") || return 1
+    for profile_file in $shipped_files; do
+        write_profile || return 1
+    done
+}
+
+# Install only after input/download validation; file failures never announce success.
 main() {
     set -eu
     accent='' green='' bold='' reset=''
@@ -50,6 +142,8 @@ main() {
         esac
     done
     case "$prefix" in /*) ;; *) echo 'Installation prefix must be absolute.' >&2; exit 1 ;; esac
+    config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
+    case "$config_directory" in /*) ;; *) echo 'Configuration directory must be absolute.' >&2; exit 1 ;; esac
     log_step 'Checking platform and installation tools'
     os=$(uname -s)
     arch=$(uname -m)
@@ -88,19 +182,12 @@ main() {
     printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
         echo 'Version must be a stable release such as 0.3.0.' >&2; exit 1;
     }
-    # Older pinned binaries do not understand the new init modes. Keep their
-    # original no-clobber init behavior, and reject an unsupported overwrite opt-in.
-    legacy_init=false
-    case "$version" in 0.[0-3].*) legacy_init=true ;; esac
-    if [ "$legacy_init" = true ] && [ "$overwrite_profiles" = true ]; then
-        echo '--overwrite-profiles requires lilbox 0.4.0 or newer.' >&2
-        exit 1
-    fi
     log_step "Preparing lilbox $version"
     name=lilbox-$version-$target
     scratch=$(mktemp -d "${TMPDIR:-/tmp}/lilbox-install.XXXXXXXX")
     pending=
-    trap 'rm -rf "$scratch"; if [ -n "$pending" ]; then rm -f "$pending"; fi' EXIT
+    profile_pending=
+    trap 'rm -rf "$scratch"; if [ -n "$pending" ]; then rm -f "$pending"; fi; if [ -n "$profile_pending" ]; then rm -f "$profile_pending"; fi' EXIT
     trap 'exit 1' HUP INT TERM
     for suffix in .tar.gz .tar.gz.sha256; do
         log_step "Downloading $name$suffix"
@@ -128,6 +215,8 @@ main() {
         echo 'Invalid release executable.' >&2
         exit 1
     fi
+    log_step 'Checking bundled profiles and agent guide'
+    stage_profiles || exit 1
     destination=$prefix/bin/lilbox
     if [ -L "$destination" ] || [ -d "$destination" ]; then
         echo "Refusing to replace a symlink or directory: $destination" >&2
@@ -146,57 +235,18 @@ main() {
     log_step "Installing $destination"
     mv -f "$pending" "$destination"
     pending=
-    # The script itself arrives on stdin in curl | sh. Ask through the controlling
-    # terminal instead; without one, preserve files and write versioned alternatives.
-    config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
-    init_option=--versioned
-    profile_action='existing files preserved; versioned alternatives written when needed'
-    installed_files='default.toml, permissive.toml, isolated.toml, AGENTS.md'
-    # Detect support instead of inferring it from a version: older 0.4.0 binaries
-    # know versioned init but not per-file selection. Never ask a misleading prompt.
-    per_file=false
-    if [ "$legacy_init" = false ] && "$destination" init --help | grep -q -- '--file'; then
-        per_file=true
+    # Ask through the controlling terminal: stdin may contain this script.
+    log_step 'Installing profiles and agent guide'
+    if ! install_profiles; then
+        printf '\nInstalled the binary at %s, but profile installation failed.\n' "$destination" >&2
+        printf 'Fix the error, then rerun the installer with --prefix ' >&2
+        shell_quote "$prefix" >&2
+        printf ' --version %s\n' "$version" >&2
+        exit 1
     fi
-    if [ "$legacy_init" = true ]; then
-        init_option=
-        installed_files='default.toml and isolated.toml (legacy release)'
-        profile_action='existing files preserved by legacy init'
-    elif [ "$overwrite_profiles" = true ]; then
-        init_option=--overwrite-profiles
-        profile_action='shipped profiles and guide replaced; custom named profiles preserved'
-    fi
-    log_step 'Initializing profiles and agent guide'
-    if [ "$per_file" = true ]; then
-        for profile_file in default.toml permissive.toml isolated.toml AGENTS.md; do
-            file_option=$init_option
-            if [ "$overwrite_profiles" = false ] &&
-                { [ -e "$config_directory/$profile_file" ] || [ -L "$config_directory/$profile_file" ]; } &&
-                ( : <> /dev/tty ) 2>/dev/null; then
-                printf 'Replace %s? [y/N] ' "$config_directory/$profile_file" > /dev/tty
-                if IFS= read -r reply < /dev/tty; then
-                    case "$reply" in y|Y|yes|YES) file_option=--overwrite-profiles ;; esac
-                fi
-            fi
-            if ! "$destination" init --file "$profile_file" "$file_option"; then
-                printf '\nInstalled the binary at %s, but profile initialization failed for %s.\n' "$destination" "$profile_file" >&2
-                printf 'Fix the error, then retry: ' >&2
-                shell_quote "$destination" >&2
-                printf ' init --file %s %s\n' "$profile_file" "$file_option" >&2
-                exit 1
-            fi
-        done
-        profile_action='per-file choices applied; existing files preserved on decline; versioned alternatives written when needed'
-    else
-        set -- init
-        if [ -n "$init_option" ]; then set -- "$@" "$init_option"; fi
-        if ! "$destination" "$@"; then
-            printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
-            printf 'Fix the error above, then retry: ' >&2
-            shell_quote "$destination" >&2
-            printf ' init %s\n' "$init_option" >&2
-            exit 1
-        fi
+    agent_guide=$config_directory/AGENTS.md
+    if [ ! -f "$agent_guide" ]; then
+        agent_guide=$repository/blob/v$version/docs/profiles.md
     fi
     printf '\n%s' "$accent"
     printf '       +-------+\n'
@@ -205,30 +255,10 @@ main() {
     printf '     |       | +   %sInstalled and ready%s\n' "$green" "$accent"
     printf '     |       |/\n'
     printf '     +-------+%s\n\n' "$reset"
-    printf '  Executable  %s\n' "$destination"
-    printf '  Configs     %s\n' "$config_directory"
-    printf '              %s\n' "$installed_files"
-    printf '              %s.\n\n' "$profile_action"
-    case ":${PATH:-}:" in
-        *":$prefix/bin:"*) ;;
-        *) printf '%sAdd to PATH%s (run now; add to your shell startup file to keep it):\n  export PATH=' "$bold" "$reset"
-           shell_quote "$prefix/bin"
-           # Expand PATH when the user runs the printed command, not during installation.
-           # shellcheck disable=SC2016
-           printf ':"$PATH"\n\n' ;;
-    esac
-    printf '%sGet started%s\n' "$bold" "$reset"
-    printf '  lilbox --help             Explore commands\n'
-    printf '  lilbox check              Inspect profiles and permissions\n'
-    printf '  lilbox shell              Open a sandboxed shell\n'
-    printf '  lilbox codex              Run Codex (install your agent separately)\n\n'
-    printf 'The shipped default allows network access with explicit coding-workspace grants.\n'
-    printf 'Existing profiles retain their settings unless replaced. Inspect with lilbox profile show.\n'
-    if [ "$os" = Linux ] && [ ! -x /usr/bin/bwrap ]; then
-        printf '\n%sLinux prerequisite%s\n' "$bold" "$reset"
-        echo 'Linux execution requires /usr/bin/bwrap (bubblewrap 0.6.3+), user namespaces, and seccomp.'
-        echo 'On Debian/Ubuntu: sudo apt-get install bubblewrap ca-certificates'
-    fi
-    printf '\nDocs: https://github.com/0xfe/lilbox#readme\n'
+    printf 'Executable:  %s\n' "$destination"
+    printf 'Configs:     %s\n\n' "$config_directory"
+    printf 'Make sure to add %s/bin to your PATH.\n\n' "$prefix"
+    printf 'To get started, prompt your coding agent with:\n\n'
+    printf 'Read %s and create a new profile for [..this project..] and show me what it does and how to use it.\n' "$agent_guide"
 }
 main "$@"

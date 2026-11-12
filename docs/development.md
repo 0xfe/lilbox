@@ -31,7 +31,7 @@ and [design.md](design.md) for module responsibilities.
 | `just check` | Formatting, Clippy with warnings denied, unit/CLI tests, and offline installer/release-script tests. |
 | `just test-sandbox` | Actual enforcement on the current host OS. |
 | `just verify` | Both sets of checks. |
-| `just test-release` | Build the native executable; offline installer and release-request regressions, including real config initialization; Python 3.9+ required. |
+| `just test-release` | Build the native executable; offline installer and release-request regressions, including real profile installation; Python 3.9+ required. |
 
 Host tests use temporary homes and fake credentials. They cover filesystem denies,
 symlinks, ancestor renames, networking, descendants, descriptors, signals, and
@@ -181,7 +181,7 @@ sha256sum -c lilbox-VERSION-TARGET.tar.gz.sha256
 Then extract and smoke-test the executable on a matching host, using temporary
 home/config directories. Confirm the archive includes the executable, README,
 license, changelog, `install.sh`, all three profiles, `examples/`, and `docs/`,
-including `docs/LILBOX-AGENTS.md`. Init installs the guide as config `AGENTS.md`.
+including `docs/LILBOX-AGENTS.md`. The installer copies the guide to config `AGENTS.md`.
 The automated host check is `python3 scripts/verify-archive.py dist/ARCHIVE.tar.gz`;
 it verifies checksums, contents, version flags, and launches with both profiles.
 
@@ -207,47 +207,45 @@ sha256sum or shasum. It supports the four published targets above and refuses
 other operating systems/architectures.
 
 Downloads use HTTPS. Before replacement, the installer checks the archive hash,
-extracts only the executable, and verifies its embedded version. A temporary file
-in the destination directory permits atomic replacement; failed downloads/checks
-leave an existing installation intact. Destination symlinks/directories are
-rejected. After replacement, the installer invokes that exact executable's `init`
-command to install default/permissive/isolated profiles and `AGENTS.md` in
-`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Each existing shipped file gets a separate
-confirmation prompt via `/dev/tty`, which works with piped installer input.
-Each decision uses `init --file NAME` with overwrite or versioned mode.
-Declining or having no usable controlling terminal selects a versioned alternative:
-existing files/symlinks are preserved, and alternatives such as
-`default.toml.0.4.0` and `AGENTS.md.0.4.0` are written without clobbering prior
-alternatives. These are inactive until reviewed and renamed.
+extracts the executable and selected profiles/guide, and verifies the embedded
+binary version. Only fixed member paths are extracted; symlink/non-regular source
+files are rejected. Missing required bundled files fail before replacing the binary.
+A temporary file beside the destination permits atomic executable replacement.
+Failed downloads/checks leave an existing installation intact.
 
-The executable embeds the native `profiles/macos/` or `profiles/linux/` defaults;
-archives contain both sets. Older 0.4 binaries without `init --file` retain their
-compatible versioned/overwrite behavior without per-file prompts.
+The installer copies files directly from that verified archive into
+`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`; it never invokes the executable to
+install configuration. Each existing shipped file gets a separate overwrite prompt
+via `/dev/tty`, which works with piped installer input. Decline/no terminal writes
+an inactive `NAME.toml.VERSION` or `AGENTS.md.VERSION` alternative. Existing
+alternatives, active symlinks, and custom named profiles are preserved. Explicit
+`--overwrite-profiles` replaces regular shipped files and rejects symlinks or
+non-regular destinations.
 
-Pinned pre-0.4 releases use their original non-overwriting init without the new
-flags or guide; an overwrite request for those versions is rejected before install.
+The installer stages mode-0600 files in the configuration directory. New names
+use a hard link without clobbering existing entries; approved replacements use a
+rename. New configuration directories use mode 0700. A profile-copy failure after
+binary replacement reports a partial installation and exits nonzero; fix the error
+and rerun the installer. Earlier files may already be installed.
 
-Passing `--overwrite-profiles` to the installer opts into `init --overwrite-profiles`
-without prompting. It replaces shipped regular files atomically, refuses symlink
-or non-regular destinations, and preserves custom named profiles. Ordinary direct
-`lilbox init` still only fills missing files. Init prints the customization-guide
-path, as do launches. Initialization requires no backend. Failure reports a
-partial installation and a retry command; earlier files may already be written.
+Current archives contain both `profiles/macos/` and `profiles/linux/`; the installer
+selects the detected OS. Older archives with profiles directly under `profiles/`
+are supported too. Only files bundled in that release are copied; if a legacy
+archive has no agent guide, the closing prompt links to its profile documentation.
 
 Progress messages identify platform selection, release lookup, archive/checksum
 downloads, checksum verification, extraction, copying, executable validation,
-installation, and profile initialization. The completion screen includes a box
-logo, executable/config paths, a quoted PATH
-command when needed, quick-start commands, and a reminder of the default profile's
-closed coding permissions (or the preserved installed profile's settings).
+installation, and profile installation. The completion screen includes a box
+logo, executable/config paths, a reminder to add the installation's bin directory
+to PATH, and one suggested coding-agent prompt using the installed guide path.
 Color follows stdout's terminal status (so `curl | sh` still uses
 color interactively), and is disabled by `NO_COLOR` (even empty) or `TERM=dumb`.
-No sudo, shell startup edits, or system package installation is performed. Missing
-Linux bubblewrap is reported with installation instructions; kernel restrictions
-must still allow actual execution.
+No sudo, shell startup edits, or system package installation is performed.
+Linux requires bubblewrap and a host that permits namespaces/seccomp; see the
+[Linux backend requirements](design.md#linux-bubblewrap-backend).
 
 `just test-release` tests checksums, download failures, platform selection, upgrades,
-initialization failure reporting, terminal colors, and PATH quoting. It also
+profile installation failure reporting, terminal colors, and the completion text. It also
 installs the actual built executable into temporary prefixes and homes to verify
 fresh configs, missing-profile creation, custom XDG paths, and preservation of
 existing files/symlinks, versioned alternatives, explicit overwrite, and both

@@ -2,6 +2,7 @@
 """Verify a release archive and exercise its executable on the matching host."""
 import hashlib
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -43,15 +44,36 @@ def verify(archive):
             result = subprocess.run([binary, flag], env={}, capture_output=True, check=True)
             assert result.stdout == f'lilbox {version}\n'.encode() and not result.stderr
         # These are real sandbox launches and require a matching, permitted host.
-        # Isolate init and scratch creation from the developer's actual home.
-        home, work, config = (root / part for part in ('home', 'work', 'config'))
-        for path in (home, work, config):
+        # Exercise the packaged installer with local archive-backed downloads,
+        # isolated from real credentials/configs and without network access.
+        home, work, tools = (root / part for part in ('home', 'work', 'tools'))
+        config = home / '.config/lilbox'
+        for path in (home, work, tools):
             path.mkdir()
-        env = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'TERM': 'dumb'}
+        downloader = tools / 'download.py'
+        downloader.write_text(
+            'import pathlib, shutil, sys\n'
+            f'archive = pathlib.Path({str(archive.resolve())!r})\n'
+            'args = sys.argv[1:]\n'
+            'url = next(arg for arg in args if arg.startswith("https://"))\n'
+            'name = url.rsplit("/", 1)[-1]\n'
+            'assert name in (archive.name, archive.name + ".sha256")\n'
+            'shutil.copyfile(archive.parent / name, args[args.index("-o") + 1])\n'
+        )
+        curl = tools / 'curl'
+        curl.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(downloader))} "$@"\n')
+        curl.chmod(0o755)
+        env = {'HOME': str(home), 'PATH': f'{tools}:/usr/bin:/bin', 'TERM': 'dumb', 'TMPDIR': str(root)}
+        prefix = root / 'installed'
+        subprocess.run(['sh', str(package / 'install.sh'), '--prefix', str(prefix), '--version', version],
+                       env=env, cwd=work, check=True, capture_output=True)
+        binary = prefix / 'bin/lilbox'
         command = [str(binary), '--config-dir', str(config)]
-        subprocess.run(command + ['init'], env=env, cwd=work, check=True, capture_output=True)
         assert (config / 'AGENTS.md').read_bytes() == (package / 'docs/LILBOX-AGENTS.md').read_bytes()
-        assert (config / 'permissive.toml').is_file()
+        platform = 'macos' if sys.platform == 'darwin' else 'linux'
+        for profile in ('default', 'isolated', 'permissive'):
+            source = package / 'profiles' / ('' if profile == 'permissive' else platform) / f'{profile}.toml'
+            assert (config / f'{profile}.toml').read_bytes() == source.read_bytes()
         for profile in ('default', 'isolated'):
             result = subprocess.run(command + ['-p', profile, 'exec', '/bin/sh', '-c', 'printf archive-ok'],
                                     env=env, cwd=work, capture_output=True, check=True)

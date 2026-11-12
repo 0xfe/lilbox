@@ -1,7 +1,7 @@
 # Configuring and using lilbox
 
 lilbox runs commands under macOS Seatbelt or Linux bubblewrap. This guide is
-installed as `AGENTS.md` beside the profiles by `lilbox init` since version 0.4.0.
+installed as `AGENTS.md` beside the profiles by the installer.
 Read this guide and edit profiles from outside the sandbox: the configuration
 directory is protected from sandboxed commands.
 
@@ -53,7 +53,8 @@ special paths may return indeterminate. Execution still needs accessible librari
 `default.toml` extends `isolated`: closed filesystem, online networking, explicit
 coding-tool/cache/agent-state grants, and a small environment keep list.
 `permissive.toml` is the explicit open option. `isolated.toml` is closed/offline.
-All three have embedded fallbacks; init installs the native OS configurations.
+All three have embedded fallbacks; the installer copies the native OS
+configurations from the release archive.
 Existing installed files retain their behavior until explicitly replaced.
 
 ### When to use .lilbox
@@ -128,17 +129,21 @@ if otherwise granted. Run `profile check` again after filesystem changes; strict
 checks treat ignored denies as warnings. Existing denies remain masked and their
 exposed ancestors protected against renaming. macOS retains future-path denies.
 
-## Initialize, upgrade, and run
+## Install, upgrade, and run
 
-`lilbox init` installs missing profiles and this guide without replacing existing
-files. `init --versioned` writes alternatives such as `default.toml.0.4.0` for
-existing files. Those alternatives are inactive until reviewed and renamed.
-`init --overwrite-profiles` replaces shipped regular files; never use it without
-the user's authorization. It refuses symlinks and non-regular destinations.
-The installer asks separately for each existing shipped profile and this guide, and
-writes versioned alternatives if declined or no terminal is available. Its
-`--overwrite-profiles` option explicitly opts into replacement. Custom named
-profiles are preserved.
+The installer copies shipped profiles and this guide from the verified release
+archive. Rerun it to restore missing files or upgrade:
+
+```sh
+curl -fsSL https://mo.town/lilbox/install.sh | sh
+```
+
+Each existing shipped file gets its own overwrite prompt. Decline/no terminal
+writes an inactive versioned alternative such as `default.toml.0.4.1`; existing
+alternatives and custom named profiles are preserved. Review alternatives before
+renaming them. The installer's `--overwrite-profiles` flag replaces shipped regular
+files without prompts, refusing symlinks and non-regular destinations. Use that
+flag only with the user's authorization.
 
 ```sh
 lilbox codex

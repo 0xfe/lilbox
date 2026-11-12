@@ -70,8 +70,8 @@ never silently run an unsandboxed command.
 
 - **CLI:** `lilbox codex [args...]`, `lilbox claude [args...]`,
   `lilbox shell [args...]`, and `lilbox exec <command> [args...]`. No arguments
-  display help. `-p NAME` selects a profile, `init` writes example profiles without
-  overwriting existing files, and `--print-policy` shows the effective sandbox.
+  display help. `-p NAME` selects a profile, and `--print-policy` shows the
+  effective sandbox. Profile installation is now handled by the installer.
   Arguments are passed directly, without constructing a shell command.
 - **Configuration:** versioned, strict TOML files in
   `${XDG_CONFIG_HOME:-~/.config}/lilbox/NAME.toml`. The built-in `default` works

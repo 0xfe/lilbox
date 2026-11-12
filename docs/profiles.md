@@ -69,7 +69,7 @@ cannot establish that its content is safe or stop a malicious same-UID writer.
 
 ## Shipped profile comparison
 
-`init` installs the native platform's files as `default.toml` and `isolated.toml`.
+The installer copies the native platform's files as `default.toml` and `isolated.toml`.
 All three shipped profile names have embedded fallbacks. Archives contain both
 [macOS](../profiles/macos/default.toml) and [Linux](../profiles/linux/default.toml)
 configurations; the executable selects at compile time.

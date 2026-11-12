@@ -29,9 +29,9 @@ fn help_version_and_missing_command() {
     assert!(!cli().arg("exec").output().unwrap().status.success());
 }
 
-/// Preserve user edits during init and reject invalid configuration before launch.
+/// Reject invalid configuration before launch without modifying its contents.
 #[test]
-fn initializes_without_overwriting_and_rejects_bad_profiles() {
+fn rejects_bad_profiles_without_modifying_them() {
     let root = tempfile::tempdir().unwrap();
     let configs = root.path().join("config");
     let run = || {
@@ -39,9 +39,8 @@ fn initializes_without_overwriting_and_rejects_bad_profiles() {
         c.arg("--config-dir").arg(&configs);
         c
     };
-    assert!(run().arg("init").output().unwrap().status.success());
+    fs::create_dir(&configs).unwrap();
     fs::write(configs.join("default.toml"), "do not overwrite").unwrap();
-    assert!(run().arg("init").output().unwrap().status.success());
     assert_eq!(
         fs::read_to_string(configs.join("default.toml")).unwrap(),
         "do not overwrite"
@@ -165,7 +164,14 @@ fn check_missing_directory_and_clean_examples() {
     assert!(!root.path().join("config").exists());
     assert!(String::from_utf8_lossy(&output.stdout).contains("embedded fallback"));
     let config = root.path().join("config");
-    lilbox::config::init(&config).unwrap();
+    fs::create_dir(&config).unwrap();
+    for (name, contents) in [
+        ("default", lilbox::config::DEFAULT_PROFILE),
+        ("isolated", lilbox::config::ISOLATED_PROFILE),
+        ("permissive", lilbox::config::PERMISSIVE_PROFILE),
+    ] {
+        fs::write(config.join(format!("{name}.toml")), contents).unwrap();
+    }
     let output = check_fixture(root.path()).arg("check").output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
@@ -395,101 +401,6 @@ fn cani_explains_paths_environment_and_network_without_performing_operations() {
         "untouched"
     );
     assert!(!root.path().join("home").exists());
-}
-
-/// Init installs the guide and honors preserve/versioned/overwrite choices.
-#[test]
-fn init_installs_agent_guide_and_versioned_alternatives() {
-    let root = tempfile::tempdir().unwrap();
-    let config = root.path().join("config");
-    let first = check_fixture(root.path()).arg("init").output().unwrap();
-    assert!(first.status.success());
-    assert!(String::from_utf8_lossy(&first.stdout).contains("Tell your coding agent to read"));
-    assert_eq!(
-        fs::read_to_string(config.join("AGENTS.md")).unwrap(),
-        lilbox::config::AGENT_GUIDE
-    );
-    assert_eq!(
-        fs::read_to_string(config.join("default.toml")).unwrap(),
-        lilbox::config::DEFAULT_PROFILE
-    );
-    assert_eq!(
-        lilbox::config::load_resolved(&config, "default")
-            .unwrap()
-            .chain,
-        ["isolated", "default"]
-    );
-    fs::write(config.join("default.toml"), "custom").unwrap();
-    assert!(
-        check_fixture(root.path())
-            .arg("init")
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert_eq!(
-        fs::read_to_string(config.join("default.toml")).unwrap(),
-        "custom"
-    );
-    assert!(
-        check_fixture(root.path())
-            .args(["init", "--versioned"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    let alternative = config.join(format!("default.toml.{}", env!("CARGO_PKG_VERSION")));
-    assert_eq!(
-        fs::read_to_string(&alternative).unwrap(),
-        lilbox::config::DEFAULT_PROFILE
-    );
-    fs::write(&alternative, "reviewed alternate").unwrap();
-    assert!(
-        check_fixture(root.path())
-            .args(["init", "--versioned"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert_eq!(
-        fs::read_to_string(&alternative).unwrap(),
-        "reviewed alternate"
-    );
-    assert!(
-        check_fixture(root.path())
-            .args(["init", "--overwrite-profiles"])
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert_eq!(
-        fs::read_to_string(config.join("default.toml")).unwrap(),
-        lilbox::config::DEFAULT_PROFILE
-    );
-}
-
-/// Explicit replacement must not follow symlinks to unrelated files.
-#[cfg(unix)]
-#[test]
-fn overwrite_profiles_refuses_symlink_targets() {
-    let root = tempfile::tempdir().unwrap();
-    let config = root.path().join("config");
-    fs::create_dir(&config).unwrap();
-    let original = root.path().join("original");
-    fs::write(&original, "unchanged").unwrap();
-    std::os::unix::fs::symlink(&original, config.join("permissive.toml")).unwrap();
-    let result = check_fixture(root.path())
-        .args(["init", "--overwrite-profiles"])
-        .output()
-        .unwrap();
-    assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("non-regular file"));
-    assert_eq!(fs::read_to_string(&original).unwrap(), "unchanged");
-    assert!(config.join("permissive.toml").is_symlink());
 }
 
 /// Scratch is created at launch, so static queries must include its future write grant.
