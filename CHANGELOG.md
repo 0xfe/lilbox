@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.1 — 2026-11-12
+
+- Select `.lilbox/profile.toml` automatically from the working directory, unless
+  overridden with `-p`. Show the selected profile path at startup and inspection.
+- Support whole-name environment globs with `*` and `?`, including `*_API_KEY`.
+- Ship separate macOS/Linux defaults extending `isolated`, with explicit coding
+  tool, workspace, cache, agent-state, and network permissions. Existing installed
+  profiles retain their settings until explicitly replaced.
+- Validate profile ownership, permissions, and opened-file identity before launch.
+  Expand credential-path protection, filter inherited proxy credentials, add
+  independent service IPC controls, and provide `check --secrets` filename scans.
+- Use `.lilbox/tmp` when the project directory exists, otherwise per-run Linux
+  tmpfs or a private macOS directory. Support custom temporary paths; permissive
+  uses system temp. macOS private directories persist after successful runs.
+- Prompt separately for each installer profile/guide replacement, simplify
+  profile inspection, and document project-local configuration for coding agents.
+- Update rustix to 1.1.6 and add dependency advisory checks to CI and releases.
+
 ## 0.4.0 — 2026-11-11
 
 - Linux now ignores deny paths absent at startup instead of restricting parent

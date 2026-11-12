@@ -15,7 +15,7 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.4.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+Version **0.4.1** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
 through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
 refuse execution.
 
@@ -36,7 +36,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose an alternate installation prefix or a specific release:
 
 ```sh
-curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
+curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.1
 ```
 
 Then create a new profile for your project with  your favourite coding agent using a prompt like:
