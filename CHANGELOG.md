@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.3 — 2026-11-12
+
+- Keep the coding-agent guide prompt in help only; ordinary launches print only
+  their version, selected profile, and command.
+- Add `profile list`, conservative profile-name suggestions, and local/global
+  selection explanations in profile inspection and diagnostics.
+- Add `doctor` with actual bounded sandbox startup, executable discovery,
+  configuration trust checks, and failure-specific remedies.
+- Explain blocked environment variables with matching filters, inherited drop
+  sources, and exact-name profile repairs without exposing secret values.
+- Add `init --project --extends NAME` to create a private local profile with
+  atomic overwrite protection. Global profiles remain installer-managed.
+- Document the commands and add portable and native host regression coverage.
+
 ## 0.4.2 — 2026-11-12
 
 - Move profile installation into the installer. It copies the native profiles and

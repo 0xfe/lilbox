@@ -4,7 +4,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use lilbox::{
-    backend, check, config, display, environment, inspect, launch, policy::ContextPaths, temporary,
+    backend, check, config, display, doctor, environment, inspect, launch, policy::ContextPaths,
+    profiles, temporary,
 };
 use std::{
     ffi::OsString,
@@ -47,6 +48,20 @@ struct Cli {
 // Built-in actions coexist with external subcommands such as `lilbox codex`.
 #[derive(Subcommand, Debug)]
 enum Action {
+    /// Diagnose sandbox startup, executable discovery, and selected configuration
+    Doctor {
+        /// Executable to locate and check (defaults to $SHELL or /bin/sh); never runs it
+        program: Option<OsString>,
+    },
+    /// Create a project-local profile; global profiles are installed by the installer
+    Init {
+        /// Create CWD/.lilbox/profile.toml without overwriting an existing entry
+        #[arg(long, required = true)]
+        project: bool,
+        /// Global parent profile
+        #[arg(long, default_value = "default")]
+        extends: String,
+    },
     /// Show the effective native system policy with indentation and colors
     Policy,
     /// Inspect effective permissions, inheritance, and configuration
@@ -83,6 +98,8 @@ enum Action {
 // Profile inspection stays separate from arbitrary target argv parsing.
 #[derive(Subcommand, Debug)]
 enum ProfileAction {
+    /// List local/global profiles and explain which one is selected
+    List,
     /// Analyze all profiles (or -p NAME), exactly like lilbox check
     Check {
         /// Treat warnings as failures too
@@ -109,14 +126,6 @@ enum ProfileAction {
         /// Path or environment name; network takes no argument
         argument: Option<String>,
     },
-}
-
-/// Tell agents where the guide lives, honoring config overrides and escaping controls.
-fn guide_note(directory: &std::path::Path) -> String {
-    format!(
-        "Tell your coding agent to read {} outside the sandbox to learn how to customize lilbox.",
-        display::safe(&directory.join("AGENTS.md").display().to_string())
-    )
 }
 
 /// Resolve one CLI request and return only for inspection, setup, or failure.
@@ -152,6 +161,36 @@ fn run() -> Result<()> {
         cwd: std::env::current_dir()?,
         config: config_directory,
     };
+    match &cli.command {
+        Some(Action::Init { extends, .. }) => {
+            if cli.profile.is_some() {
+                bail!("init --project uses --extends NAME, not -p NAME");
+            }
+            let path = profiles::create_project(&paths, extends, cli.allow_shared_profiles)?;
+            println!("Created {}", display::safe(&path.display().to_string()));
+            println!(
+                "Selected automatically in this directory unless -p is supplied. Inspect with `lilbox profile show`."
+            );
+            return Ok(());
+        }
+        Some(Action::Doctor { program }) => {
+            if !doctor::run(
+                &paths,
+                cli.profile.as_deref(),
+                cli.allow_shared_profiles,
+                program.as_deref(),
+            )? {
+                bail!("doctor found failures; apply the remedies above and rerun");
+            }
+            return Ok(());
+        }
+        Some(Action::Profile {
+            command: ProfileAction::List,
+        }) => {
+            return profiles::list(&paths, cli.profile.as_deref(), cli.allow_shared_profiles);
+        }
+        _ => {}
+    }
     if let Some(
         Action::Check { strict, secrets }
         | Action::Profile {
@@ -238,11 +277,14 @@ fn run() -> Result<()> {
                 display::paint(label, style, cli.color.enabled(false)),
                 display::safe(&answer.reason)
             );
+            for line in &answer.advice {
+                println!("{}", display::safe(line));
+            }
             println!(
                 "Static policy answer; host permissions, runtime dependencies, and native operation rules still apply."
             );
             if answer.allowed != Some(true) {
-                bail!("capability is denied or indeterminate");
+                std::process::exit(1);
             }
             return Ok(());
         }
@@ -268,7 +310,11 @@ fn run() -> Result<()> {
             command.extend(args);
             command
         }
-        Action::Check { .. } | Action::Policy | Action::Profile { .. } => {
+        Action::Doctor { .. }
+        | Action::Init { .. }
+        | Action::Check { .. }
+        | Action::Policy
+        | Action::Profile { .. } => {
             unreachable!()
         }
     };
@@ -277,7 +323,6 @@ fn run() -> Result<()> {
     let _scratch = temporary::prepare(temporary_kind, &mut paths)?;
     let policy = loaded.policy(&paths)?;
     let child_environment = environment::build(profile, &paths, std::env::vars_os())?;
-    eprintln!("{}", guide_note(&paths.config));
     print_startup(
         &format!("{} — {}", profile_name, display::safe(&loaded.selection())),
         &argv,

@@ -21,6 +21,8 @@ is a historical implementation/verification record.
   and provenance tracking.
 - `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
+- `src/profiles.rs`: profile inventory, spelling suggestions, and project-only creation.
+- `src/doctor.rs`: real startup probe and actionable host/configuration diagnostics.
 - `src/discovery.rs`: optional bounded filename-only project-secret inventory.
 - `src/display.rs`: terminal-safe formatting, colors, and native policy indentation.
 - `src/inspect.rs`: effective profile summaries, origins, and static cani queries.
@@ -57,6 +59,9 @@ just build                    # debug build, locked dependencies
 just run --help
 just run policy
 just run check                # inspect every profile without launching
+just run profile list
+just run doctor               # bounded real sandbox startup probe
+just run init --project --extends default # creates local policy, never overwrites
 just run -p default check --strict
 just fmt
 just install                  # writes ~/.local/bin/lilbox
@@ -71,6 +76,9 @@ Default inherits isolated; all three profiles have embedded fallbacks.
 `profiles/macos/` and `profiles/linux/` contain the native closed starters. The
 binary embeds its native fallbacks; the installer copies the matching platform
 files from the archive. CWD/.lilbox/profile.toml overrides default unless -p is set.
+`init --project` creates only local policy with no-clobber publication; it does not
+install global profiles. Doctor runs only /usr/bin/true in disposable isolated
+policy and inspects the requested executable without running it.
 Prefer temporary homes/config directories for tests;
 do not modify real credentials or user profiles as test fixtures.
 

@@ -36,6 +36,8 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
 | [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
+| [src/profiles.rs](../src/profiles.rs) | Global profile inventory, spelling suggestions, and atomic project scaffold creation. |
+| [src/doctor.rs](../src/doctor.rs) | Bounded real startup probe, configuration trust, and executable diagnostics with remedies. |
 | [src/discovery.rs](../src/discovery.rs) | Optional bounded filename-only project-secret inventory. |
 | [src/display.rs](../src/display.rs) | Terminal-safe colors, abbreviated notices, and native policy indentation. |
 | [src/inspect.rs](../src/inspect.rs) | Effective profile display with origins and static capability queries. |
@@ -54,6 +56,22 @@ The library exposes these modules; the binary coordinates them. `anyhow` carries
 contextual errors, Clap parses arguments, Serde/TOML parse configuration, `tempfile`
 provides private temporary storage, and `libc` supplies Unix launch operations. `Cargo.lock`
 is tracked because lilbox is an application.
+
+## Discovery, setup, and diagnostics
+
+- `profile list` enumerates global names plus embedded starters and the CWD-local
+  path, then uses the same selection resolver as launch. `LoadedProfile` retains
+  the precedence reason for list/show/doctor. Suggestions never alter selection.
+- `init --project` validates the parent, stages a complete mode-0600 TOML file,
+  and uses `persist_noclobber` to publish it. Existing entries and directory
+  symlinks fail. Global file installation remains in `install.sh`.
+- `doctor` re-enters the current executable with an empty environment and disposable
+  HOME/CWD/config, selecting embedded isolated policy and `/usr/bin/true`. This
+  uses ordinary launch hardening and backend descriptor ownership. File-backed
+  stderr avoids pipe deadlock; timeout kills/reaps the child; temporary files are
+  removed when the probe finishes. Configuration/executable checks are independent.
+- Environment queries use the launch filter with a sentinel, report matching rules
+  and provenance, and suggest exact-name changes. No environment values are logged.
 
 ## Launch flow
 
@@ -100,7 +118,7 @@ flowchart TD
    name and source path (or embedded fallback), and actual command including shell startup flags. Complex arguments are
    quoted and terminal controls/non-UTF-8 bytes escaped for display only. Color
    requires a stderr terminal, no `NO_COLOR`, and a TERM other than `dumb`.
-   Launches also print the customization guide path. Inspection and configuration
+   The customization-guide prompt appears only in help. Inspection and configuration
    commands have no startup banner.
 7. On Unix, `CommandExt::exec` replaces lilbox with
    `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>` or

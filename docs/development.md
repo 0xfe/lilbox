@@ -295,6 +295,15 @@ Existing bucket objects, including the separately published installer, are
 preserved. See the [website README](https://github.com/0xfe/lilbox/blob/main/www/README.md)
 for details and icon provenance.
 
+## Diagnostic regression coverage
+
+- Portable CLI tests cover local/global selection, spelling suggestions, project
+  creation with overwrite/symlink protection, and environment repair instructions.
+- Both native enforcement suites include the shared doctor test. It proves actual
+  startup, missing-executable remedies, configuration trust failures, and launch
+  output without the help-only coding-agent prompt.
+- Doctor tests use disposable homes/configs; never point fixtures at real profiles.
+
 ## Extend lilbox
 
 - Configuration and network capabilities belong in the typed policy.

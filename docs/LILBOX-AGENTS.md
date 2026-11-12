@@ -22,6 +22,8 @@ Configuration comes from `--config-dir DIR`, then `$XDG_CONFIG_HOME/lilbox`, the
 `~/.config/lilbox`. Run inspection commands from the intended working directory:
 
 ```sh
+lilbox profile list
+lilbox doctor
 lilbox profile check
 lilbox -p default profile show --origins
 lilbox -p default profile show --all --origins
@@ -36,7 +38,8 @@ lilbox -p default profile cani network
 `show`, `policy`, `cani`, and launches use CWD/.lilbox/profile.toml when present,
 otherwise default. An explicit `-p NAME` always selects the named global profile.
 There is no parent-directory search; local `extends` names resolve globally.
-Startup and `show` identify the selected source path.
+Startup and `show` identify the selected source path. `list`, `show`, and `doctor`
+explain why local or global policy was selected. Missing names get suggestions.
 `--color auto|always|never` controls inspection colors. Auto respects NO_COLOR.
 `show` abbreviates long lists; `--all` expands them. `--origins` labels inherited
 values and list entries by source profile. Environment assignment values stay hidden.
@@ -56,6 +59,21 @@ coding-tool/cache/agent-state grants, and a small environment keep list.
 All three have embedded fallbacks; the installer copies the native OS
 configurations from the release archive.
 Existing installed files retain their behavior until explicitly replaced.
+
+Create a project scaffold outside the sandbox:
+
+```sh
+lilbox init --project --extends isolated
+```
+
+Use `--extends default` when the requested workflow needs the online coding
+starter. Creation refuses existing files/symlinks and validates the parent. Global
+starter installation remains the installer's responsibility. Review the result.
+
+`profile cani read-env NAME` names filters, overriding drops and their sources,
+and shows the narrowest supported repair. Preserve existing keep entries. Drop
+lists are additive; remove/narrow a matching rule at its source. Never write secret
+values into a profile to work around filtering. Injection hooks have no override.
 
 ### When to use .lilbox
 

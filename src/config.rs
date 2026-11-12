@@ -201,6 +201,8 @@ pub struct LoadedProfile {
     pub allow_shared: bool,
     /// Configuration root, including when every selected source is embedded.
     pub directory: PathBuf,
+    /// Explain the CLI/local/global precedence decision.
+    pub selection_reason: String,
     /// Absence used for automatic selection must remain true until exec.
     pub absent_local: Option<PathBuf>,
 }
@@ -334,6 +336,16 @@ pub fn load_selected(
     } else {
         None
     };
+    let selection_reason = if let Some(name) = name {
+        format!(
+            "explicit -p {name} selects a global profile; CWD/.lilbox/profile.toml is not considered"
+        )
+    } else if selected.is_some() {
+        "no -p supplied; CWD/.lilbox/profile.toml takes precedence over global default".into()
+    } else {
+        "no -p supplied and no CWD/.lilbox/profile.toml; using global default (embedded if absent)"
+            .into()
+    };
     let absent_local = if name.is_none() && selected.is_none() {
         local
     } else {
@@ -364,6 +376,7 @@ pub fn load_selected(
         allow_shared,
         directory: directory.into(),
         absent_local,
+        selection_reason,
     })
 }
 
@@ -407,8 +420,18 @@ impl Resolver<'_> {
                     (source.to_owned(), true, path.clone())
                 }
                 Err(error) => {
+                    let hint = if fallback
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                        && fs::symlink_metadata(&path).is_err()
+                    {
+                        crate::profiles::suggestion(self.directory, name)
+                    } else {
+                        String::new()
+                    };
                     return Err(error)
-                        .with_context(|| format!("cannot read profile {}", path.display()));
+                        .with_context(|| format!("cannot read profile {}{hint}", path.display()));
                 }
             };
         if self.visiting.contains(&identity) {

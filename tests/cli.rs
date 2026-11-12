@@ -17,6 +17,7 @@ fn help_version_and_missing_command() {
         assert!(output.status.success());
         let help = String::from_utf8_lossy(&output.stdout);
         assert!(help.contains("Usage:"));
+        assert!(help.contains("Tell your coding agent"));
         assert!(help.contains(&version), "{help}");
         assert!(output.stderr.is_empty());
     }
@@ -455,4 +456,187 @@ fn project_secret_check_is_read_only_and_never_prints_values() {
     assert!(!text.contains("MUST_NOT_PRINT_SECRET_VALUE"));
     assert!(!root.path().join("home").exists());
     assert!(!root.path().join("config").exists());
+}
+
+/// Inventory includes embedded/global/local sources and explains all selection branches.
+#[test]
+fn profile_inventory_selection_and_spelling_suggestions() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("config")).unwrap();
+    fs::write(
+        root.path().join("config/work.toml"),
+        "version=1\nextends='default'",
+    )
+    .unwrap();
+    let list = check_fixture(root.path())
+        .args(["profile", "list"])
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    let text = String::from_utf8_lossy(&list.stdout);
+    assert!(text.contains("work.toml") && text.contains("embedded fallback"));
+    assert!(text.contains("no CWD/.lilbox/profile.toml"));
+    fs::create_dir(root.path().join(".lilbox")).unwrap();
+    fs::write(
+        root.path().join(".lilbox/profile.toml"),
+        "version=1\nextends='work'",
+    )
+    .unwrap();
+    for command in ["list", "show"] {
+        let result = check_fixture(root.path())
+            .args(["profile", command])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stdout)
+                .contains("takes precedence over global default")
+        );
+        let result = check_fixture(root.path())
+            .args(["-p", "isolated", "profile", command])
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stdout).contains("explicit -p isolated"));
+    }
+    let typo = check_fixture(root.path())
+        .args(["-p", "defualt", "profile", "show"])
+        .output()
+        .unwrap();
+    assert!(!typo.status.success());
+    assert!(String::from_utf8_lossy(&typo.stderr).contains("did you mean \"default\""));
+    fs::write(
+        root.path().join(".lilbox/profile.toml"),
+        "version=1\nextends='wrok'",
+    )
+    .unwrap();
+    let typo = check_fixture(root.path())
+        .args(["profile", "show"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&typo.stderr).contains("did you mean \"work\""));
+    // Listing must still reveal candidate names when local selection is broken.
+    let list = check_fixture(root.path())
+        .args(["profile", "list"])
+        .output()
+        .unwrap();
+    assert!(!list.status.success());
+    assert!(String::from_utf8_lossy(&list.stdout).contains("work.toml"));
+}
+
+/// The scaffold is valid, private and never replaces existing policy or symlinks.
+#[test]
+#[cfg(unix)]
+fn project_creation_is_validated_and_never_clobbers() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let root = tempfile::tempdir().unwrap();
+    let create = || {
+        check_fixture(root.path())
+            .args(["init", "--project", "--extends", "default"])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !check_fixture(root.path())
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let bad = check_fixture(root.path())
+        .args(["init", "--project", "--extends", "defualt"])
+        .output()
+        .unwrap();
+    assert!(!bad.status.success());
+    assert!(!root.path().join(".lilbox").exists());
+    let result = create();
+    assert!(result.status.success(), "{result:?}");
+    let profile = root.path().join(".lilbox/profile.toml");
+    let original = fs::read(&profile).unwrap();
+    assert_eq!(
+        fs::metadata(&profile).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(!create().status.success());
+    assert_eq!(fs::read(&profile).unwrap(), original);
+    assert!(
+        check_fixture(root.path())
+            .args(["profile", "show"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::remove_file(&profile).unwrap();
+    symlink(root.path().join("missing"), &profile).unwrap();
+    assert!(!create().status.success());
+    assert!(
+        fs::symlink_metadata(&profile)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    fs::remove_file(&profile).unwrap();
+    fs::create_dir(&profile).unwrap();
+    assert!(!create().status.success());
+    fs::remove_dir_all(root.path().join(".lilbox")).unwrap();
+    symlink(root.path().join("elsewhere"), root.path().join(".lilbox")).unwrap();
+    assert!(!create().status.success());
+    assert!(!root.path().join("elsewhere").exists());
+}
+
+/// Suggested exact-name keep repairs work; every additive inherited drop is identified.
+#[test]
+fn environment_answers_show_minimal_repairs_and_overriding_rules() {
+    let root = tempfile::tempdir().unwrap();
+    let query = |name: &str| {
+        check_fixture(root.path())
+            .args(["profile", "cani", "read-env", name])
+            .output()
+            .unwrap()
+    };
+    let result = query("ANTHROPIC_API_KEY");
+    let text = String::from_utf8_lossy(&result.stdout);
+    assert!(!result.status.success());
+    assert!(
+        text.contains("*API_KEY*")
+            && text.contains("ANTHROPIC_*")
+            && text.contains("environment.inherit=false"),
+        "{text}"
+    );
+    assert!(text.contains("keep = [\"ANTHROPIC_API_KEY\"]"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("capability is denied"));
+    fs::create_dir(root.path().join(".lilbox")).unwrap();
+    fs::write(
+        root.path().join(".lilbox/profile.toml"),
+        "version=1\nextends='default'\n[environment]\nkeep=['ANTHROPIC_API_KEY']",
+    )
+    .unwrap();
+    assert!(query("ANTHROPIC_API_KEY").status.success());
+    fs::create_dir(root.path().join("config")).unwrap();
+    fs::write(
+        root.path().join("config/default.toml"),
+        "version=1\nextends='isolated'\n[environment]\ndrop=['*_API_KEY', 'ANTHROPIC_*']",
+    )
+    .unwrap();
+    let result = query("ANTHROPIC_API_KEY");
+    assert!(!result.status.success());
+    let text = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        text.contains("overrides keep and set")
+            && text.contains("drop = [] in a child does not clear")
+    );
+    assert!(
+        text.contains("default.toml") && text.contains("*_API_KEY") && text.contains("ANTHROPIC_*")
+    );
+    assert!(
+        !text.contains("keep = ["),
+        "existing keep must not be prescribed again: {text}"
+    );
+    let result = query("NODE_OPTIONS");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("No profile override is supported"));
+    let result = query("SSH_AUTH_SOCK");
+    let text = String::from_utf8_lossy(&result.stdout);
+    assert!(text.contains("service_ipc = true") && text.contains("keep = [\"SSH_AUTH_SOCK\"]"));
 }
