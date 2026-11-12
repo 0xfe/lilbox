@@ -4,8 +4,11 @@
 pub mod backend;
 pub mod check;
 pub mod config;
+pub mod discovery;
 pub mod display;
 pub mod environment;
 pub mod inspect;
 pub mod launch;
 pub mod policy;
+pub mod temporary;
+pub mod trust;

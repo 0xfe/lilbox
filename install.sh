@@ -151,42 +151,52 @@ main() {
     config_directory=${XDG_CONFIG_HOME:-$HOME/.config}/lilbox
     init_option=--versioned
     profile_action='existing files preserved; versioned alternatives written when needed'
-    existing=false
-    for profile_file in default.toml permissive.toml isolated.toml AGENTS.md; do
-        if [ -e "$config_directory/$profile_file" ] || [ -L "$config_directory/$profile_file" ]; then
-            existing=true
-        fi
-    done
     installed_files='default.toml, permissive.toml, isolated.toml, AGENTS.md'
+    # Detect support instead of inferring it from a version: older 0.4.0 binaries
+    # know versioned init but not per-file selection. Never ask a misleading prompt.
+    per_file=false
+    if [ "$legacy_init" = false ] && "$destination" init --help | grep -q -- '--file'; then
+        per_file=true
+    fi
     if [ "$legacy_init" = true ]; then
         init_option=
         installed_files='default.toml and isolated.toml (legacy release)'
         profile_action='existing files preserved by legacy init'
     elif [ "$overwrite_profiles" = true ]; then
         init_option=--overwrite-profiles
-    elif [ "$existing" = true ] && ( : <> /dev/tty ) 2>/dev/null; then
-        printf 'Replace existing shipped profiles and AGENTS.md in %s? [y/N] ' "$config_directory" > /dev/tty
-        if IFS= read -r reply < /dev/tty; then
-            case "$reply" in y|Y|yes|YES) init_option=--overwrite-profiles ;; esac
-        fi
-    fi
-    if [ "$init_option" = --overwrite-profiles ]; then
         profile_action='shipped profiles and guide replaced; custom named profiles preserved'
     fi
-    # Invoke this exact executable, even if another lilbox is already on PATH.
-    set -- init
-    if [ -n "$init_option" ]; then
-        set -- "$@" "$init_option"
-        log_step 'Initializing profiles and agent guide'
+    log_step 'Initializing profiles and agent guide'
+    if [ "$per_file" = true ]; then
+        for profile_file in default.toml permissive.toml isolated.toml AGENTS.md; do
+            file_option=$init_option
+            if [ "$overwrite_profiles" = false ] &&
+                { [ -e "$config_directory/$profile_file" ] || [ -L "$config_directory/$profile_file" ]; } &&
+                ( : <> /dev/tty ) 2>/dev/null; then
+                printf 'Replace %s? [y/N] ' "$config_directory/$profile_file" > /dev/tty
+                if IFS= read -r reply < /dev/tty; then
+                    case "$reply" in y|Y|yes|YES) file_option=--overwrite-profiles ;; esac
+                fi
+            fi
+            if ! "$destination" init --file "$profile_file" "$file_option"; then
+                printf '\nInstalled the binary at %s, but profile initialization failed for %s.\n' "$destination" "$profile_file" >&2
+                printf 'Fix the error, then retry: ' >&2
+                shell_quote "$destination" >&2
+                printf ' init --file %s %s\n' "$profile_file" "$file_option" >&2
+                exit 1
+            fi
+        done
+        profile_action='per-file choices applied; existing files preserved on decline; versioned alternatives written when needed'
     else
-        log_step 'Initializing profiles (legacy release)'
-    fi
-    if ! "$destination" "$@"; then
-        printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
-        printf 'Fix the error above, then retry: ' >&2
-        shell_quote "$destination" >&2
-        printf ' init %s\n' "$init_option" >&2
-        exit 1
+        set -- init
+        if [ -n "$init_option" ]; then set -- "$@" "$init_option"; fi
+        if ! "$destination" "$@"; then
+            printf '\nInstalled the binary at %s, but profile initialization failed.\n' "$destination" >&2
+            printf 'Fix the error above, then retry: ' >&2
+            shell_quote "$destination" >&2
+            printf ' init %s\n' "$init_option" >&2
+            exit 1
+        fi
     fi
     printf '\n%s' "$accent"
     printf '       +-------+\n'
@@ -212,8 +222,8 @@ main() {
     printf '  lilbox check              Inspect profiles and permissions\n'
     printf '  lilbox shell              Open a sandboxed shell\n'
     printf '  lilbox codex              Run Codex (install your agent separately)\n\n'
-    printf 'The default profile allows network access and broad filesystem access,\n'
-    printf 'with specific private-path denies. Edit profiles to customize permissions.\n'
+    printf 'The shipped default allows network access with explicit coding-workspace grants.\n'
+    printf 'Existing profiles retain their settings unless replaced. Inspect with lilbox profile show.\n'
     if [ "$os" = Linux ] && [ ! -x /usr/bin/bwrap ]; then
         printf '\n%sLinux prerequisite%s\n' "$bold" "$reset"
         echo 'Linux execution requires /usr/bin/bwrap (bubblewrap 0.6.3+), user namespaces, and seccomp.'

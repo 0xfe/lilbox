@@ -82,6 +82,10 @@ pub fn cani(
         let settings = &loaded.profile.environment;
         let reason = if environment::injection_variable(&upper) {
             "runtime injection variables are always removed".into()
+        } else if !loaded.profile.runtime.service_ipc
+            && environment::SERVICE_VARIABLES.contains(&upper.as_str())
+        {
+            "runtime.service_ipc=false removes this service pointer".into()
         } else if matches!(input, "HOME" | "PWD" | "PATH" | "LILBOX") {
             "mandatory launch normalization supplies this name".into()
         } else if matches!(input, "TMPDIR" | "TMP" | "TEMP" | "OLDPWD") {
@@ -245,6 +249,7 @@ fn path_origin(loaded: &LoadedProfile, paths: &ContextPaths, path: &Path, field:
         );
     }
     if path_aliases(&paths.config).is_ok_and(|p| p.contains(path))
+        || path_aliases(&paths.cwd.join(".lilbox/profile.toml")).is_ok_and(|p| p.contains(path))
         || loaded
             .sources
             .iter()
@@ -253,7 +258,7 @@ fn path_origin(loaded: &LoadedProfile, paths: &ContextPaths, path: &Path, field:
         "mandatory configuration protection".into()
     } else {
         format!(
-            "shared credential list: {}",
+            "filesystem.protect_credentials: {}",
             loaded.origin("filesystem.protect_credentials", None)
         )
     }
@@ -273,11 +278,18 @@ pub fn show(
     let mut output = display::paint("Effective profile", "1;36", color) + "\n";
     scalar(
         &mut output,
-        "Inheritance (base → child)",
-        loaded.chain.join(" → "),
+        "extends",
+        loaded
+            .chain
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" -> "),
         "",
         false,
     );
+    scalar(&mut output, "profile path", loaded.selection(), "", false);
     scalar(
         &mut output,
         "Working directory",
@@ -287,41 +299,52 @@ pub fn show(
     );
     scalar(
         &mut output,
-        "Mode",
+        "mode",
         if p.mode == Mode::Open {
-            "open — broad access with exclusions"
+            "open"
         } else {
-            "closed — explicit grants only"
+            "closed"
         },
         &loaded.origin("mode", None),
         origins,
     );
     scalar(
         &mut output,
-        "Network",
-        format!("{:?}", policy.network),
+        "network",
+        format!("{:?}", policy.network).to_ascii_lowercase(),
         &loaded.origin("network", None),
         origins,
     );
     heading(&mut output, "Filesystem", color);
     scalar(
         &mut output,
-        "Shared credential protection",
+        "filesystem.protect_credentials",
         p.filesystem.protect_credentials,
         &loaded.origin("filesystem.protect_credentials", None),
         origins,
     );
-    output.push_str("  Denies override grants. Write grants also permit reads and execution.\n");
+
     for (label, field, entries) in [
-        ("Read grants", "filesystem.allow_read", &policy.read),
-        ("Write grants", "filesystem.allow_write", &policy.write),
-        ("Active denies", "filesystem.deny", &policy.deny),
+        (
+            "filesystem.allow_read",
+            "filesystem.allow_read",
+            &policy.read,
+        ),
+        (
+            "filesystem.allow_write",
+            "filesystem.allow_write",
+            &policy.write,
+        ),
+        ("filesystem.deny", "filesystem.deny", &policy.deny),
         (
             "Ignored absent denies (Linux)",
             "filesystem.deny",
             &policy.ignored_denies,
         ),
     ] {
+        if label == "Ignored absent denies (Linux)" && entries.is_empty() {
+            continue;
+        }
         list(
             &mut output,
             label,
@@ -341,15 +364,22 @@ pub fn show(
     heading(&mut output, "Environment", color);
     scalar(
         &mut output,
-        "Inherit ordinary variables",
+        "environment.keep_proxy_credentials",
+        p.environment.keep_proxy_credentials,
+        &loaded.origin("environment.keep_proxy_credentials", None),
+        origins,
+    );
+    scalar(
+        &mut output,
+        "environment.inherit",
         p.environment.inherit.unwrap_or(p.mode == Mode::Open),
         &loaded.origin("environment.inherit", None),
         origins,
     );
-    output.push_str("  Sensitive names are filtered unless explicitly kept or set.\n  Injection hooks are always blocked. Drops override keep/set.\n  HOME, PWD, PATH, LILBOX and scratch variables are normalized last.\n");
+
     for (label, field, entries) in [
-        ("Keep", "environment.keep", &p.environment.keep),
-        ("Drop", "environment.drop", &p.environment.drop),
+        ("environment.keep", "environment.keep", &p.environment.keep),
+        ("environment.drop", "environment.drop", &p.environment.drop),
     ] {
         list(
             &mut output,
@@ -364,7 +394,7 @@ pub fn show(
     }
     list(
         &mut output,
-        "Assignments (values hidden)",
+        "environment.set (values hidden)",
         p.environment
             .set
             .keys()
@@ -389,23 +419,66 @@ pub fn show(
         origins,
     );
     heading(&mut output, "Runtime", color);
-    if p.mode == Mode::Open {
-        output.push_str("  Open baseline already permits ordinary runtime operations.\n");
-    }
+
     scalar(
         &mut output,
-        "Basic runtime",
+        "runtime.basic",
         p.runtime.basic,
         &loaded.origin("runtime.basic", None),
         origins,
     );
     scalar(
         &mut output,
-        "Private scratch",
+        "runtime.temporary_directory",
         p.runtime.temporary_directory,
         &loaded.origin("runtime.temporary_directory", None),
         origins,
     );
+    scalar(
+        &mut output,
+        "runtime.service_ipc",
+        p.runtime.service_ipc,
+        &loaded.origin("runtime.service_ipc", None),
+        origins,
+    );
+    scalar(
+        &mut output,
+        "runtime.keychain (macOS)",
+        p.runtime.keychain,
+        &loaded.origin("runtime.keychain", None),
+        origins,
+    );
+    if p.runtime.temporary_directory {
+        scalar(
+            &mut output,
+            "runtime.temp_dir",
+            &p.runtime.temp_dir,
+            &loaded.origin("runtime.temp_dir", None),
+            origins,
+        );
+        scalar(
+            &mut output,
+            "temporary path",
+            paths.temporary.display(),
+            "",
+            false,
+        );
+        if p.runtime.temp_dir == "private"
+            || (p.runtime.temp_dir == "auto" && !paths.cwd.join(".lilbox").is_dir())
+        {
+            scalar(
+                &mut output,
+                "temporary storage",
+                if cfg!(target_os = "linux") {
+                    "per-invocation tmpfs"
+                } else {
+                    "per-invocation directory (run-PENDING allocated at launch)"
+                },
+                "",
+                false,
+            );
+        }
+    }
     output
         .push_str("\nStatic policy view; host permissions and native runtime rules still apply.\n");
     if !origins {

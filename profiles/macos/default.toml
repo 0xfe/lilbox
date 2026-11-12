@@ -1,0 +1,23 @@
+# Online coding workspace. Add project-specific permissions in .lilbox/profile.toml.
+version = 1
+extends = "isolated"
+network = "allow"
+
+[filesystem]
+# Tool installations are readable/executable; no blanket home-directory grant.
+allow_read = ["~/.local/bin", "~/.local/share/claude", "~/.nvm", "~/.volta", "~/.rustup", "~/.cargo/bin", "/opt/homebrew", "/Library/Developer", "/Applications/Xcode.app/Contents/Developer"]
+# Agent login/state and package caches are intentional same-user capabilities.
+allow_write = ["~/.codex", "~/.claude", "~/.claude.json", "~/.cache/pip", "~/.cache/uv", "~/.cache/node", "~/.npm", "~/.cargo/registry", "~/.cargo/git"]
+
+[environment]
+# Keep ordinary terminal, tool search, proxy, and public CA settings only.
+keep = ["PATH", "HTTP*_PROXY", "ALL_PROXY", "NO_PROXY", "FTP_PROXY", "SSL_CERT_*", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"]
+# Optional extra whole-name drops, e.g. ["INTERNAL_*_TOKEN"].
+# runtime.service_ipc=false independently removes common service pointers.
+drop = []
+keep_proxy_credentials = false
+
+[runtime]
+service_ipc = false
+# Native macOS public trust discovery shares these services with keychain APIs.
+keychain = true

@@ -1,10 +1,10 @@
-# A permissive development profile with extra private paths and environment drops.
-# Parent: local default.toml when present, otherwise lilbox's embedded default.
+# An online coding profile with extra private paths and environment drops.
+# Parent: global default.toml when present, otherwise the embedded native default.
 version = 1
 extends = "default"
 
 [filesystem]
-# Appended to inherited denies; ordinary files elsewhere remain writable.
+# Appended to inherited denies; the closed default grants only configured paths.
 deny = ["~/Documents/Personal", "${CWD}/production.env"]
 
 [environment]

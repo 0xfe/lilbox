@@ -55,60 +55,144 @@ pub(crate) fn injection_variable(name: &str) -> bool {
         .any(|pattern| matches_pattern(name, pattern))
 }
 
+/// Built-in sensitive-name defaults use the same glob language as profile rules.
+/// Explicit keep/set can opt into these; injection patterns remain unconditional.
+pub(crate) const SENSITIVE_PATTERNS: &[&str] = &[
+    "*TOKEN*",
+    "*SECRET*",
+    "*PASSWORD*",
+    "*PASSWD*",
+    "*API_KEY*",
+    "*APIKEY*",
+    "*PRIVATE_KEY*",
+    "*CREDENTIAL*",
+    "*ACCESS_KEY*",
+    "*AUTH*",
+    "AWS_*",
+    "AZURE_*",
+    "GOOGLE_*",
+    "GCLOUD_*",
+    "OPENAI_*",
+    "ANTHROPIC_*",
+    "COHERE_*",
+    "HUGGING_FACE_*",
+    "HUGGINGFACE_*",
+    "SSH_AGENT_PID",
+    "SSH_CONNECTION",
+    "SSH_CLIENT",
+    "GPG_AGENT_INFO",
+    "KRB5CCNAME",
+    "DOCKER_HOST",
+    "KUBECONFIG",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "HF_TOKEN",
+];
+
+/// Ambient pointers suppressed when desktop/service IPC is disabled.
+pub(crate) const SERVICE_VARIABLES: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "DOCKER_HOST",
+    "CONTAINER_HOST",
+];
+
 /// Identify likely secrets by uppercase name; values are deliberately not scanned.
 fn sensitive(name: &str) -> bool {
-    // This is a public trust-bundle path, not an AWS credential. Other common
-    // CA variables and proxy settings likewise pass through inherited environments.
-    if name == "AWS_CA_BUNDLE" {
-        return false;
-    }
-    [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "API_KEY",
-        "APIKEY",
-        "PRIVATE_KEY",
-        "CREDENTIAL",
-        "ACCESS_KEY",
-        "AUTH",
-    ]
-    .iter()
-    .any(|part| name.contains(part))
-        || [
-            "AWS_",
-            "AZURE_",
-            "GOOGLE_",
-            "GCLOUD_",
-            "OPENAI_",
-            "ANTHROPIC_",
-            "COHERE_",
-            "HUGGING_FACE_",
-            "HUGGINGFACE_",
-        ]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-        || matches!(
-            name,
-            "SSH_AGENT_PID"
-                | "SSH_CONNECTION"
-                | "SSH_CLIENT"
-                | "GPG_AGENT_INFO"
-                | "KRB5CCNAME"
-                | "DOCKER_HOST"
-                | "KUBECONFIG"
-                | "DATABASE_URL"
-                | "REDIS_URL"
-                | "HF_TOKEN"
-        )
+    // A public trust-bundle location is not an AWS credential.
+    name != "AWS_CA_BUNDLE" && SENSITIVE_PATTERNS.iter().any(|p| matches_pattern(name, p))
 }
 
-/// Match an exact name or trailing-star prefix; callers normalize case first.
+/// Match a whole name using ASCII literals, '*' (zero or more), and '?' (one).
+/// Callers normalize case first. Remember only the most recent star: no recursion
+/// or exponential backtracking, even for adversarial configuration patterns.
 pub(crate) fn matches_pattern(name: &str, pattern: &str) -> bool {
-    pattern
-        .strip_suffix('*')
-        .map_or(name == pattern, |prefix| name.starts_with(prefix))
+    let (name, pattern) = (name.as_bytes(), pattern.as_bytes());
+    let (mut n, mut p) = (0, 0);
+    let mut star = None;
+    let mut retry = 0;
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == name[n]) {
+            n += 1;
+            p += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = n;
+        } else if let Some(at) = star {
+            retry += 1;
+            n = retry;
+            p = at + 1;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|b| *b == b'*')
+}
+
+/// Bound diagnostic intersection work and reject unsupported regex/glob syntax.
+fn valid_pattern(pattern: &str) -> bool {
+    !pattern.is_empty()
+        && pattern.len() <= 256
+        && pattern
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_*?".contains(&b))
+        && !pattern.as_bytes()[0].is_ascii_digit()
+}
+
+/// Decide glob intersection with a bounded product-state search. A star can
+/// consume the other pattern's next character or advance without consuming.
+pub(crate) fn patterns_overlap(a: &str, b: &str) -> bool {
+    if !valid_pattern(a) || !valid_pattern(b) {
+        return false;
+    }
+    let (a, b) = (a.to_ascii_uppercase(), b.to_ascii_uppercase());
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut seen = vec![false; (a.len() + 1) * (b.len() + 1)];
+    let mut pending = vec![(0, 0)];
+    while let Some((i, j)) = pending.pop() {
+        let index = i * (b.len() + 1) + j;
+        if seen[index] {
+            continue;
+        }
+        seen[index] = true;
+        if i == a.len() && j == b.len() {
+            return true;
+        }
+        if a.get(i) == Some(&b'*') {
+            pending.push((i + 1, j));
+        }
+        if b.get(j) == Some(&b'*') {
+            pending.push((i, j + 1));
+        }
+        if let (Some(&x), Some(&y)) = (a.get(i), b.get(j)) {
+            if x == y || b"*?".contains(&x) || b"*?".contains(&y) {
+                pending.push((i + usize::from(x != b'*'), j + usize::from(y != b'*')));
+            }
+        }
+    }
+    false
+}
+
+/// Recognize userinfo in proxy URL authority without logging or parsing secrets.
+fn proxy_credentials(name: &str, value: &OsStr) -> bool {
+    if !matches!(
+        name,
+        "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "FTP_PROXY"
+    ) {
+        return false;
+    }
+    let text = value.to_string_lossy();
+    let authority = text
+        .split_once("://")
+        .map_or(text.as_ref(), |(_, rest)| rest);
+    authority
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|part| part.contains('@'))
 }
 
 /// Accept portable ASCII variable names, with digits permitted after the first byte.
@@ -125,9 +209,9 @@ pub(crate) fn validation_errors(settings: &crate::config::Environment) -> Vec<St
     let mut errors = Vec::new();
     for (field, patterns) in [("keep", &settings.keep), ("drop", &settings.drop)] {
         for pattern in patterns {
-            if !valid_name(pattern.strip_suffix('*').unwrap_or(pattern)) {
+            if !valid_pattern(pattern) {
                 errors.push(format!(
-                    "environment.{field}: invalid pattern {pattern:?}; use NAME or PREFIX*"
+                    "environment.{field}: invalid pattern {pattern:?}; use ASCII names with '*' or '?' (maximum 256 bytes)"
                 ));
             }
         }
@@ -171,6 +255,9 @@ pub fn build(
             .iter()
             .any(|p| matches_pattern(&upper, &p.to_ascii_uppercase()));
         if !injection_variable(&upper) && (keep || (inherits && !sensitive(&upper))) {
+            if !settings.keep_proxy_credentials && proxy_credentials(&upper, &value) {
+                continue;
+            }
             result.insert(key, value);
         }
     }
@@ -180,6 +267,11 @@ pub fn build(
         result.insert(name.into(), value.into());
     }
     result.retain(|key, _| {
+        if !profile.runtime.service_ipc
+            && SERVICE_VARIABLES.contains(&key.to_string_lossy().to_ascii_uppercase().as_str())
+        {
+            return false;
+        }
         !settings.drop.iter().any(|p| {
             matches_pattern(
                 &key.to_string_lossy().to_ascii_uppercase(),
@@ -244,6 +336,72 @@ pub fn shell_command(shell: &Path) -> Result<Vec<OsString>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Cover anchoring, repeated stars, suffixes, single-character matches and intersections.
+    #[test]
+    fn globs_and_overlap_use_the_same_language() {
+        for (pattern, name, expected) in [
+            ("*_API_KEY", "OPENAI_API_KEY", true),
+            ("*_API_KEY", "OPENAI_API_KEY_EXTRA", false),
+            ("A**B*C", "ABxxC", true),
+            ("A?C", "ABC", true),
+            ("A?C", "AC", false),
+            ("*", "ANY_NAME", true),
+            ("*SECRET*", "MY_SECRET_KEY", true),
+        ] {
+            assert_eq!(
+                matches_pattern(name, pattern),
+                expected,
+                "{pattern}: {name}"
+            );
+        }
+        for (a, b, expected) in [
+            ("OPENAI_*", "*_API_KEY", true),
+            ("FOO?", "foo*", true),
+            ("*A", "*B", false),
+            ("FOO", "BAR*", false),
+            ("A*B", "A?B", true),
+        ] {
+            assert_eq!(patterns_overlap(a, b), expected, "{a}: {b}");
+        }
+        let profile = crate::config::parse("version=1\n[environment]\nkeep=['*KEY','NODE_*']\ndrop=['*_API_KEY']\nset={MY_API_KEY='fake'}").unwrap();
+        let env = build(
+            &profile,
+            &paths(),
+            [
+                ("lower_api_key".into(), "fake".into()),
+                ("NODE_OPTIONS".into(), "fake".into()),
+            ],
+        )
+        .unwrap();
+        for name in ["lower_api_key", "MY_API_KEY", "NODE_OPTIONS"] {
+            assert!(!env.contains_key(OsStr::new(name)));
+        }
+    }
+
+    /// Proxy userinfo needs its own explicit opt-in, even with a broad keep glob.
+    #[test]
+    fn proxy_credentials_and_service_variables_require_explicit_permission() {
+        let mut profile = crate::config::parse(
+            "version=1\n[environment]\nkeep=['*PROXY']\n[runtime]\nservice_ipc=false",
+        )
+        .unwrap();
+        let vars = [
+            ("https_proxy".into(), "http://user:fake@proxy:8080".into()),
+            (
+                "DBUS_SESSION_BUS_ADDRESS".into(),
+                "unix:path=/socket".into(),
+            ),
+        ];
+        let env = build(&profile, &paths(), vars.clone()).unwrap();
+        assert!(!env.contains_key(OsStr::new("https_proxy")));
+        assert!(!env.contains_key(OsStr::new("DBUS_SESSION_BUS_ADDRESS")));
+        profile.environment.keep_proxy_credentials = true;
+        assert!(
+            build(&profile, &paths(), vars)
+                .unwrap()
+                .contains_key(OsStr::new("https_proxy"))
+        );
+    }
     /// Provide launch metadata without accessing a real user home or workspace.
     fn paths() -> ContextPaths {
         ContextPaths {
@@ -310,7 +468,7 @@ mod tests {
                 .contains_key(OsStr::new("OPENAI_API_KEY"))
         );
         for settings in [
-            "keep=['*KEY*']",
+            "keep=['[KEY]']",
             "set={NODE_OPTIONS='bad'}",
             "set={'BAD=NAME'='x'}",
         ] {

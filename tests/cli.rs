@@ -91,7 +91,7 @@ fn check_aggregates_errors_without_leaking_assignments_or_writing_files() {
     fs::create_dir(&config).unwrap();
     fs::write(config.join("bad.toml"), "version=1\nextends='missing'").unwrap();
     fs::write(config.join("cycle.toml"), "version=1\nextends='cycle'").unwrap();
-    fs::write(config.join("invalid.toml"), "version=1\n[filesystem]\nallow_read=['../escape', '${UNKNOWN}/path']\n[environment]\nkeep=['*bad*']\nset={NODE_OPTIONS='DO_NOT_PRINT_SECRET', 'BAD=NAME'='DO_NOT_PRINT_SECRET'}").unwrap();
+    fs::write(config.join("invalid.toml"), "version=1\n[filesystem]\nallow_read=['../escape', '${UNKNOWN}/path']\n[environment]\nkeep=['[bad]']\nset={NODE_OPTIONS='DO_NOT_PRINT_SECRET', 'BAD=NAME'='DO_NOT_PRINT_SECRET'}").unwrap();
     let output = check_fixture(root.path()).arg("check").output().unwrap();
     assert!(!output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
@@ -106,7 +106,7 @@ fn check_aggregates_errors_without_leaking_assignments_or_writing_files() {
         "environment.keep",
         "NODE_OPTIONS",
         "BAD=NAME",
-        "5 profile(s)",
+        "6 profile(s)",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -132,13 +132,13 @@ fn check_selected_chain_reports_conflicts_and_strict_exit_status() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     for expected in [
-        "default → work",
+        "work -> default -> isolated",
         "blocked by deny",
         "drop wins",
         "cannot restore",
         "overwritten or removed",
         "cannot remove mandatory",
-        "environment.inherit=true",
+        "environment.inherit=false",
         "0 error(s)",
         "1 profile(s)",
     ] {
@@ -171,7 +171,7 @@ fn check_missing_directory_and_clean_examples() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("3 profile(s), 0 error(s)"), "{text}");
     #[cfg(target_os = "macos")]
-    assert!(text.contains("0 warning(s)"), "{text}");
+    assert!(text.contains("1 warning(s)"), "{text}");
 }
 
 /// Detect aliases of denied paths and unsafe scratch permissions without changing either.
@@ -190,7 +190,7 @@ fn check_rejects_unsafe_scratch_and_finds_canonical_conflicts() {
     symlink(&private, root.path().join("alias")).unwrap();
     fs::write(
         config.join("work.toml"),
-        "version=1\nextends='default'\n[filesystem]\nallow_write=['alias']",
+        "version=1\nextends='default'\n[filesystem]\nallow_write=['alias']\n[runtime]\ntemp_dir='~/.cache/lilbox/tmp'",
     )
     .unwrap();
     let output = check_fixture(root.path())
@@ -330,7 +330,7 @@ fn profile_show_reports_item_origins_and_can_expand_lists() {
     let short = run(&[]);
     assert!(short.status.success(), "{short:?}");
     let text = String::from_utf8(short.stdout).unwrap();
-    assert!(text.contains("Network: Allow  [child]"), "{text}");
+    assert!(text.contains("network: allow  [child]"), "{text}");
     assert!(text.contains("A  [base]"));
     assert!(text.contains("FLAG  [child]"));
     assert!(text.contains("3 more items"));
@@ -417,7 +417,7 @@ fn init_installs_agent_guide_and_versioned_alternatives() {
         lilbox::config::load_resolved(&config, "default")
             .unwrap()
             .chain,
-        ["permissive", "default"]
+        ["isolated", "default"]
     );
     fs::write(config.join("default.toml"), "custom").unwrap();
     assert!(
@@ -500,7 +500,7 @@ fn cani_accounts_for_scratch_creation_without_creating_it() {
     fs::create_dir(&config).unwrap();
     fs::write(
         config.join("scratch.toml"),
-        "version=1\nmode='closed'\n[runtime]\nbasic=true\ntemporary_directory=true",
+        "version=1\nmode='closed'\n[runtime]\nbasic=true\ntemporary_directory=true\ntemp_dir='~/.cache/lilbox/tmp'",
     )
     .unwrap();
     let result = check_fixture(root.path())
@@ -516,4 +516,32 @@ fn cani_accounts_for_scratch_creation_without_creating_it() {
         .unwrap();
     assert!(result.status.success(), "{result:?}");
     assert!(!root.path().join("home").exists());
+}
+
+/// Discovery is opt-in, reports paths without contents, and does not create policy/scratch.
+#[test]
+fn project_secret_check_is_read_only_and_never_prints_values() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("nested")).unwrap();
+    fs::write(
+        root.path().join("nested/.env.production"),
+        "MUST_NOT_PRINT_SECRET_VALUE",
+    )
+    .unwrap();
+    let ordinary = check_fixture(root.path())
+        .args(["-p", "isolated", "check"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&ordinary.stdout).contains(".env.production"));
+    let output = check_fixture(root.path())
+        .args(["-p", "isolated", "check", "--secrets", "--strict"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("nested/.env.production"));
+    assert!(text.contains("policy unchanged"));
+    assert!(!text.contains("MUST_NOT_PRINT_SECRET_VALUE"));
+    assert!(!root.path().join("home").exists());
+    assert!(!root.path().join("config").exists());
 }

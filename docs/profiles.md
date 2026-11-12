@@ -1,558 +1,340 @@
 # Sandbox profiles and effective permissions
 
-This reference describes the shipped [permissive](../profiles/permissive.toml),
-[default](../profiles/default.toml), and [isolated](../profiles/isolated.toml) profiles, including rules added by Rust code.
-It must be updated whenever configuration, filesystem rules, environment filters,
-network/trust handling, runtime capabilities, or launch behavior change.
-
-See [security and authentication](security.md) for boundaries and login setup,
-and [design.md](design.md) for implementation details. Normal filesystem
-permissions and host authorization still apply. Installed profiles can differ
-from these examples; Seatbelt-specific operations below apply only to macOS.
+This reference describes effective permissions, including backend restrictions and
+launch normalization. Update it whenever profile behavior changes.
 
 ## Selection and inspection
 
+| Priority | Selected profile |
+| --- | --- |
+| 1 | Explicit `-p NAME`, from the global profile directory. |
+| 2 | `.lilbox/profile.toml` in the current working directory, if present. |
+| 3 | Global `default.toml`, or its embedded fallback. |
+
+Global directory lookup: `--config-dir DIR`, `$XDG_CONFIG_HOME/lilbox`, then
+`~/.config/lilbox`. No parent-directory search is performed. A malformed, unsafe,
+or dangling local profile fails; it never silently falls back to default.
+Local `extends` names refer to global profiles, not adjacent project files.
+Relative filesystem paths always use the launch working directory.
+
 ```sh
-lilbox init                       # create missing example files
-lilbox codex                      # default profile
-lilbox -p isolated shell
+lilbox profile show --all --origins
 lilbox policy
-lilbox -p isolated policy
+lilbox check
+lilbox -p isolated check --strict
 ```
 
-Resolution order is `--config-dir DIR`, then `$XDG_CONFIG_HOME/lilbox`, then
-`~/.config/lilbox`. A profile named `NAME` uses `NAME.toml`. Missing `default` and
-`permissive` profiles have embedded fallbacks; `isolated` requires its file.
-The shipped default inherits permissive. Other profiles are standalone unless
-they declare `extends = "NAME"`. Existing standalone default files remain valid.
+- Startup prints the selected name and source path, including embedded-fallback status.
+- `show` prints `extends: child -> parent -> base`, the profile path, resolved paths,
+  and configuration keys. `--origins` identifies the source of each setting.
+- `check` includes all global profiles and the local profile when present; `-p`
+  selects one global chain. It creates no directories or files.
+- `--strict` fails on warnings, including open filesystem + online + inherited
+  environment and Linux's ignored missing denies.
+- `cani read-path|write-path|execute-path|read-env|network` is static analysis.
+  Exit 0 means allowed; exit 1 means denied, indeterminate, or invalid.
+- `cani` does not execute, access the queried resource, or test connectivity.
+  Host permissions, executable dependencies, and native operation rules still apply.
+- Assignment values are never printed. Colors honor `--color`, `NO_COLOR`, and `TERM`.
 
-Before a launch, lilbox displays its embedded version, selected profile name, and
-command (including shell startup flags) on stderr. Arguments are quoted and
-control characters escaped for display; the original arguments are passed directly
-to the command. The summary is colored on terminals unless `NO_COLOR` is set or
-`TERM=dumb`. Help, version, `init`, `check`, and `policy` omit this summary.
+### Project-secret discovery
 
-`init` preserves existing files unless `--overwrite-profiles` is explicit.
-`init --versioned` writes alternatives such as `default.toml.0.4.0`. The installer
-asks before replacing shipped profiles and AGENTS.md; declining or no terminal
-selects versioned alternatives. Those alternatives are inactive until renamed.
-Shared policy code changes still affect existing profiles. Init and launches print
-the path of the installed agent customization guide.
-`lilbox policy` replaces the old flag and shows indented, colored Seatbelt rules or
-quoted bubblewrap arguments
-with descriptor placeholders and a syscall-filter summary for the current
-home/CWD. It neither launches a process nor prints the child environment or asks
-the kernel to enforce the policy.
+`lilbox check --secrets` (also `profile check --secrets`) inventories possible
+secret filenames beneath CWD. It reads no candidate contents and changes no rules.
 
-## Linux bubblewrap permissions
+- Recognizes `.env*`, common private-key suffixes/names, and conventional credential files.
+- Skips `.git`, `node_modules`, `target`, `dist`, `.lilbox/tmp`, and directory symlinks.
+- Stops with an error at 100,000 entries or beyond 32 directory levels; I/O failures
+  are errors too. The report states skipped regions and possible false positives.
+- Candidate paths are warnings, including already-protected files; `--strict` fails
+  when candidates exist. Review paths before adding explicit `filesystem.deny` entries.
 
-Linux x86_64/aarch64 requires `/usr/bin/bwrap` 0.6.3+, user/PID/IPC/UTS
-namespaces, and seccomp. Missing support is a launch failure.
+## Profile integrity
 
-| Mode | Filesystem baseline | Runtime requirement |
-| --- | --- | --- |
-| Open | Host root, subject to denies and the restrictions below. | Basic runtime is available. |
-| Closed | Explicit grants and private runtime mounts only. | `runtime.basic = true`; otherwise the profile is rejected. |
+- Source files, the configuration directory, and their resolved ancestors must be
+  owned by the effective user or root, without group/other write permission.
+- Root-owned sticky ancestors such as `/tmp` are permitted. The configuration
+  directory itself must still satisfy the stricter ownership/mode checks.
+- Symlinked files are supported. Both source and target ancestry are checked.
+- Each file is opened once. Metadata and its protected target come from that
+  descriptor; identities and modification stamps are checked again before exec.
+- Source replacement, modification, retargeting, or appearance after an embedded
+  fallback was selected causes launch failure.
+- `--allow-shared-profiles` explicitly relaxes owner/mode checks. Identity checks
+  still apply, and `check` warns about the relaxation.
 
-### Linux filesystem grants
-
-| Rule | Effect |
-| --- | --- |
-| Closed-mode read grant | Read-only mount with executable access. |
-| Closed-mode write grant | Read/write/execute access; wins over overlapping read grants. |
-| Existing denied directory or file | Empty, mode-000, read-only mount applied after grants. Original content stays untouched; mountpoint names/metadata may remain visible. |
-| Ancestor of a denied path | Pinned as a mountpoint wherever the host directory is exposed, preventing renames. |
-| Symlink or inherited profile | Canonical targets remain protected. |
-| Missing read grant | Exposes nothing. |
-| Missing standalone write root | Must be created outside the sandbox before use. An existing writable ancestor permits future children, subject to denies. |
-| Scratch storage | Created and validated before mounting. |
-| Synthetic ancestors and closed root | Read-only. |
-
-Upgrading lilbox does not rewrite user profiles. As on macOS, pre-existing hard
-links and cooperating unsandboxed filesystem changes are outside the boundary.
-
-### Missing denied paths
-
-**Linux ignores denied paths that are absent at startup.** The effective deny set
-is snapshotted after path expansion and inheritance/configuration protection.
-No host placeholders are created and no parent becomes read-only merely because a
-denied name is absent. Existing denies still override grants and pin exposed
-ancestors against renaming.
-
-A launch (and policy/profile inspection) prints an ignored-path notice showing at
-most three paths, followed by `and N other files` when needed. `profile check`
-reports ignored denies as warnings; `--strict` fails on these warnings.
-`profile show --all` expands the complete ignored set.
-
-For example, if `${CWD}/.env` is missing, the sandbox may create and read `.env`
-when CWD is writable. If `.env` exists at the next launch, it is then denied.
-The same applies outside CWD: an absent `~/.aws` does not freeze home directory
-entries. A name created later in the run has no deny protection from its ignored
-rule, though other active denies and the closed baseline still apply.
-
-This applies to missing explicit, credential, and configuration deny paths.
-Dangling symlinks or other resolution errors still fail validation rather than
-being treated as ordinary absent paths. macOS continues to deny future paths.
-
-### Linux runtime isolation
-
-| Resource | Behavior in both modes |
-| --- | --- |
-| Namespaces | Private user, PID, IPC, and UTS namespaces. |
-| Terminal session | New session; inherited standard I/O remains open, but the host controlling terminal is detached. |
-| `/proc` | Shows sandbox processes. |
-| `/dev` | Standard devices, fd links, and private PTYs. |
-| `/sys` | Empty, read-only mount. |
-| Explicit policy paths inside `/proc`, `/dev`, or `/sys` | Rejected; these trees are reserved for the runtime. |
-| Capabilities | Dropped. |
-| Ordinary processes and threads | Allowed; `clone3` returns `ENOSYS` for fallback to `clone`. |
-
-The seccomp filter rejects:
-
-- Other syscall ABIs and x32.
-- Namespace creation and mount changes.
-- Ptrace/process-memory access and open-by-handle.
-- Kernel keyring access, BPF, and terminal injection ioctls.
-- io_uring, whose socket operations could bypass ordinary syscall filtering.
-
-This is a focused filter, not a complete syscall allowlist or a VM. Nested sandbox
-tools may fail under these restrictions.
-
-### Linux networking and certificates
-
-| Policy | Behavior |
-| --- | --- |
-| Online | Shares host networking, including accessible host Unix sockets. |
-| Offline | Private network namespace; blocks socket creation, including TCP, UDP, Unix, and socketpairs. |
-| Offline exception | Route-netlink inside the private namespace is available for bubblewrap loopback setup. |
-
-- System CA files under the starter `/etc` and `/usr` grants remain readable;
-  custom CA files need explicit grants. TLS verification stays enabled.
-- Inherited standard I/O must not carry an unwanted network capability.
-- Online desktop services can expose secrets through Unix sockets; filesystem
-  denial alone does not block service-mediated access.
-
-See [network policy and trust services](security.md#networking-and-certificates)
-for the cross-platform boundary.
-
-### Linux launch behavior
-
-| Feature | Behavior |
-| --- | --- |
-| Environment and limits | Shared filtering, umask, and core-limit rules apply. |
-| Extra descriptors | Only backend-owned filter/mask descriptors survive lilbox cleanup; bubblewrap consumes them before target execution. |
-| Process lifecycle | Bubblewrap supervises the PID namespace and preserves exit codes; signal deaths return `128 + signal`. |
-| Shell fallback | `/bin/sh` when `SHELL` is unset. |
-| `policy` | Quoted arguments and a syscall-filter summary. Descriptor placeholders make this an inspection format, not a standalone shell command. |
-
-Linux uses bubblewrap's `--new-session` so interactive shells do not try to
-restore a host process group that is invisible inside the private PID namespace.
-Terminal input/output through inherited descriptors still works, including TTY
-detection, but host terminal job control is unavailable. Shells may report that
-job control is disabled; programs requiring a controlling `/dev/tty` may fail.
-
-The Seatbelt runtime tables below describe macOS operations, not Linux Mach
-services or sysctl policy.
+A checked-out local profile is executable policy, not untrusted project data.
+Review it before launching lilbox in an unfamiliar repository. Ownership checks
+cannot establish that its content is safe or stop a malicious same-UID writer.
 
 ## Shipped profile comparison
 
-| Capability | `default` | `isolated` |
-| --- | --- | --- |
-| Baseline | `mode = "open"`: allow by default. | `mode = "closed"`: deny by default. |
-| Ordinary filesystem access | Broad read/write/execute access outside shared denies. | Explicit system reads, CWD read/write, scratch access, and basic runtime devices only. |
-| Workspace | No workspace boundary. | The directory from which lilbox is launched, recursively, subject to denies. |
-| Credential/private paths | Shared deny list enabled. | Same deny list, even inside an otherwise granted subtree. |
-| lilbox configuration | Config directory and all profile/dependency targets denied. | Same. |
-| Network | All network operations allowed. | Network operations denied, including TCP/UDP and Unix sockets. |
-| Native TLS trust services | Available; certificate verification stays enabled. | No online-trust service grants; credential service restrictions enabled. |
-| Environment | Inherit, then scrub sensitive/injection variables. | Inherit nothing except explicitly kept terminal/locale/timezone variables. |
-| Proxy and CA variables | Inherited unless explicitly dropped. | Not inherited by the shipped profile. |
-| Runtime | Open baseline already permits ordinary runtime operations. | `runtime.basic = true` explicitly grants the bundle below. |
-| Scratch | `~/.cache/lilbox/tmp`, read/write. | Same. |
-| Agent state/authentication | Files such as `~/.codex` and `~/.claude` are not on the built-in deny list. | Available only if covered by a grant, with denies still taking precedence. |
+`init` installs the native platform's files as `default.toml` and `isolated.toml`.
+All three shipped profile names have embedded fallbacks. Archives contain both
+[macOS](../profiles/macos/default.toml) and [Linux](../profiles/linux/default.toml)
+configurations; the executable selects at compile time.
 
-## `permissive` and `default`: open filesystem and networking
+| Setting | `default` | `isolated` | `permissive` |
+| --- | --- | --- | --- |
+| Parent | `isolated` | None | None |
+| `mode` | `closed` | `closed` | `open` |
+| `network` | `allow` | `deny` | `allow` |
+| `environment.inherit` | `false` | `false` | `true` |
+| `runtime.basic` | `true` | `true` | `false`; open baseline supplies runtime operations |
+| `runtime.service_ipc` | `false` | `false` | `true` |
+| `runtime.temp_dir` | `auto` | `auto` | `system` |
+| `filesystem.protect_credentials` | `true` | `true` | `true` |
 
-`default.toml` contains `version = 1` and `extends = "permissive"`. Add personal
-overrides there; `permissive.toml` holds the reusable open baseline. The following
-settings describe permissive and the resulting unmodified default.
+Existing installed profiles are preserved until explicitly replaced. Upgrading the
+binary alone does not convert an old open default into the new closed default.
 
-The permissive profile has `mode = "open"`, `network = "allow"`,
-`filesystem.protect_credentials = true`, `environment.inherit = true`, and
-`runtime.temporary_directory = true`. Its additional `deny`, `keep`, and `drop`
-lists are empty; `runtime.basic` is omitted and defaults to false.
+### Closed defaults and coding workflows
 
-The Seatbelt baseline is `(allow default)`, with `(allow network*)` and the shared
-filesystem restrictions described below. The disabled basic bundle does not limit
-the open baseline's process, device, sysctl, or Mach-service permissions.
+Both closed starters allow workspace writes and platform system reads:
 
-Ordinary home files, projects, toolchains, caches, system files accessible to the
-user, and agent state can be read or modified unless a deny matches. `/opt/homebrew`,
-`~/.cargo`, `~/.rustup`, `~/.codex`, and `~/.claude` are not denied simply because
-they are outside the current directory. The selected profile/configuration path
-or additional user deny entries can still overlap any of them.
-
-### Network, certificates, and proxies
-
-DNS, inbound/outbound network operations, TCP/UDP, Unix sockets, HTTPS, and
-WebSockets are unrestricted by lilbox's default network policy. There is no
-hostname/port allowlist, forced proxy, or distinction between agent and child
-process network access.
-
-Native macOS certificate and trust services, including SecurityServer/securityd
-and trustd, remain available. These services expose public trust certificates as
-well as keychain-related APIs. Denying them wholesale previously caused native
-root loading to fail with TLS `UnknownIssuer` errors. lilbox does not install
-certificates, substitute trust roots, or disable certificate verification.
-
-Direct access to `~/Library/Keychains` remains denied. This is a filesystem rule,
-not a guarantee that an online process cannot obtain a keychain item through an
-allowed native service and macOS authorization.
-
-The inherited environment preserves `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
-`FTP_PROXY`, `NO_PROXY`, and lowercase equivalents. It also preserves ordinary
-CA settings, including `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`,
-`CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, and `AWS_CA_BUNDLE`. Proxy URLs can contain
-credentials. Explicit `environment.drop` entries remove unwanted settings.
-Keeping a CA path in the environment does not override a filesystem deny on it.
-
-## `isolated`: explicit filesystem and runtime grants
-
-The shipped profile has `mode = "closed"`, `network = "deny"`, credential
-protection enabled, `environment.inherit = false`, and both runtime options true.
-It starts with `(deny default)` and then adds the grants below.
-
-### Read and executable-map grants
-
-Each configured path grants `file-read*` and `file-map-executable` on the path and
-its descendants, with lexical/canonical aliases resolved at launch:
-
-| Path | Purpose |
+| Platform | System read/execute grants |
 | --- | --- |
-| `/System/Library` | System frameworks, libraries, and resources. |
-| `/System/Cryptexes` | System runtime resources exposed through Cryptexes. |
-| `/usr` | System tools/libraries and anything else under this subtree, including `/usr/local`. |
-| `/bin` | Basic executables. |
-| `/sbin` | Basic system executables. |
-| `/Library/Apple` | Apple-provided runtime resources. |
-| `/private/etc` | macOS system configuration files. |
-| `/etc` | Linux system configuration and CA bundles (an alias of `/private/etc` on macOS). |
-| `/etc/resolv.conf` | Includes its canonical target when resolver configuration is symlinked outside `/etc`. |
-| `/lib`, `/lib64` | Linux loaders/libraries; existing symlink targets are included. Absent paths on the other OS grant nothing. |
+| macOS | `/System/Library`, `/System/Cryptexes`, `/usr`, `/bin`, `/sbin`, `/Library/Apple`, `/private/etc`, `/private/var/select/sh` |
+| Linux | `/usr`, `/bin`, `/sbin`, `/etc`, `/etc/resolv.conf`, `/lib`, `/lib64` |
 
-The profile does not grant all of `/System`; `/System/Volumes/Data` exposes the
-data volume. `/opt/homebrew` is not part of the shipped read list. A path's presence
-on the read list does not put it on executable search PATH or guarantee that all
-of a program's other required files/services are available.
+`default` adds:
 
-### Read/write grants
+- Online networking and native certificate discovery.
+- Read/execute: `~/.local/bin`, `~/.local/share/claude`, `~/.nvm`, `~/.volta`,
+  `~/.rustup`, and `~/.cargo/bin`.
+- macOS tool reads: `/opt/homebrew`, `/Library/Developer`, and
+  `/Applications/Xcode.app/Contents/Developer`.
+- Linux tool reads: `/opt`.
+- Writes: `~/.codex`, `~/.claude`, `~/.claude.json`, `~/.cache/pip`, `~/.cache/uv`,
+  `~/.cache/node`, `~/.npm`, `~/.cargo/registry`, and `~/.cargo/git`.
+- Locale/terminal, PATH, proxy, and public CA environment variables through explicit
+  `keep` rules. No broad environment inheritance.
 
-- `${CWD}` and its descendants: read, write, and executable mapping.
-- `~/.cache/lilbox/tmp` and its descendants: the same operations, added by
-  `runtime.temporary_directory`.
-- The device-specific operations in the basic runtime table below.
+Agent state grants intentionally expose saved logins and settings. Add other
+agent installations and caches explicitly. On Linux, missing host grant roots
+are omitted: create required state/cache directories outside the sandbox first.
+A custom CA variable also needs a read grant for its referenced bundle.
 
-All other data paths are denied by the closed baseline, apart from ancestor
-metadata and explicit basic-runtime grants. The home directory is not implicitly
-granted by setting HOME. However, starting lilbox **in your home directory** makes
-that home directory the CWD write grant. Start from the project directory when
-that is the intended scope. An explicit/shared deny always takes precedence.
+`permissive` remains the explicit broad-access option. It permits unrelated host
+files except protected paths, service IPC, and the system temporary directory.
 
 ### Basic runtime grants
 
-The exact bundle lives in [runtime.sb](../src/backend/runtime.sb):
+`runtime.basic=true` enables ordinary process execution in closed mode:
 
-| Seatbelt operation | Scope |
+- macOS: fork/exec, same-sandbox signals, sysctl reads, root metadata, directory
+  service lookup, terminal and standard-device operations from
+  [runtime.sb](../src/backend/runtime.sb).
+- Linux: private `/proc`, `/dev`, `/sys`, process namespaces, and baseline syscall
+  support. Closed Linux profiles require this setting.
+
+It does not grant arbitrary tools, libraries, data directories, or networking.
+Never grant all of `/System` on macOS: it includes `/System/Volumes/Data`.
+
+## Filesystem rules
+
+| Field | Meaning |
 | --- | --- |
-| `process-exec`, `process-fork` | Permit starting/forking processes; executable paths still require filesystem grants. |
-| `signal`, `process-info*` | Only `target same-sandbox`. |
-| `sysctl-read` | Reads allowed; no general sysctl-write grant. |
-| `mach-lookup` | `com.apple.system.opendirectoryd.libinfo` for user information. |
-| `file-read*` | Literal `/` only, not its descendants; required by native runtime startup. |
-| `file-read-metadata` | Literal `/dev`. |
-| `file-read*` | `/dev/random`, `/dev/urandom`. |
-| `file-read*`, `file-write-data` | `/dev/null`, `/dev/zero`, and `/dev/fd` subtree. |
-| `file-read*`, `file-write*`, `file-ioctl` | `/dev/tty`, `/dev/ptmx`, and paths matching `^/dev/ttys[0-9]+$`. |
-| `pseudo-tty` | Permit PTY creation. |
+| `allow_read` | Read and executable mapping for each subtree. |
+| `allow_write` | Read, executable mapping, and modification for each subtree. |
+| `deny` | Exclude a subtree even beneath a broader grant. |
+| `protect_credentials` | Add the maintained credential-path inventory. |
 
-In addition, filesystem grants allow `file-read-metadata` on their ancestors for
-traversal/getcwd. They do not recursively allow those ancestors' contents.
+Paths support absolute paths, `~/`, `${HOME}`, `${CWD}`, and CWD-relative paths.
+No filesystem globbing, arbitrary variable expansion, `~otheruser`, or `..`.
+Empty paths, control characters, invalid UTF-8, and dangling symlinks fail.
+Lexical and canonical aliases are protected. Existing denies also protect their
+ancestors against rename/removal. Pre-existing hard-link aliases are not tracked.
 
-### Environment and certificates
+### Shared filesystem restrictions
 
-Only these parent variables are explicitly kept if present:
-`TERM`, `COLORTERM`, `LANG`, `LC_ALL`, `LC_CTYPE`, and `TZ`. Mandatory launch context
-and scratch variables are added as described below. PATH defaults to
-`/usr/bin:/bin:/usr/sbin:/sbin`.
+The complete inventory is [CREDENTIAL_PATHS](../src/policy.rs). It covers:
 
-API credentials, proxy settings, custom CA environment variables, and the parent's
-other variables are not inherited. The profile denies network operations and
-credential-service lookups, so it does not promise successful native trust-store
-enumeration or online TLS use. Certificate files already covered by an explicit
-read grant may be readable; that does not enable networking.
-
-To make a custom online closed profile, change `network` to `"allow"`, grant the
-agent's executable/libraries/state and any additional CA files it needs, and
-explicitly keep required environment variables. The backend then adds Mach
-lookups for `com.apple.mDNSResponder`, `com.apple.trustd`,
-`com.apple.trustd.agent`, `com.apple.SecurityServer`, `com.apple.securityd`, and
-`com.apple.securityd.xpc`. It does not automatically grant arbitrary certificate
-directories or other services.
-
-## Shared filesystem restrictions
-
-Both shipped profiles enable `filesystem.protect_credentials`. The following is
-the complete built-in deny list from [policy.rs](../src/policy.rs). Each entry
-matches itself and its descendants; file entries are not special-cased as files.
-
-| Category | Denied paths |
+| Category | Examples |
 | --- | --- |
-| SSH/cloud/orchestration | `~/.ssh`, `~/.aws`, `~/.azure`, `~/.kube`, `~/.config/gcloud` |
-| GPG and password stores | `~/.gnupg`, `~/.password-store`, `~/.local/share/keyrings`, `~/.config/op` |
-| Git hosting and stored credentials | `~/.config/gh`, `~/.config/hub`, `~/.git-credentials` |
-| Tool/service credentials | `~/.docker/config.json`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.vault-token`, `~/.terraform.d/credentials.tfrc.json` |
-| Linux desktop credentials/browser data | `~/.local/share/kwalletd`, `~/.config/1Password`, `~/.config/google-chrome`, `~/.config/chromium`, `~/.mozilla` |
-| Private folder | `~/Private` |
-| macOS Keychains / 1Password | `~/Library/Keychains`, `~/Library/Group Containers/2BUA8C4S2C.com.1password`, `~/Library/Application Support/1Password` |
-| Browsers | `~/Library/Application Support/Google/Chrome`, `~/Library/Application Support/Firefox`, `~/Library/Safari` |
-| Personal application data | `~/Library/Mail`, `~/Library/Messages` |
-| History | `~/.bash_history`, `~/.zsh_history`, `~/.python_history`, `~/.local/share/fish/fish_history` |
-| Launch-directory environment files | `${CWD}/.env`, `${CWD}/.env.local` |
+| SSH, cloud, signing | `~/.ssh`, `~/.aws`, `~/.azure`, `~/.gnupg`, `~/.kube`, gcloud/gh/hub configuration |
+| Password stores | 1Password, desktop keyrings, KWallet, `~/.password-store`, `~/Private` |
+| Developer credentials | `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, Vault/Terraform credentials |
+| Rust/JVM | `.cargo/credentials`, `.cargo/credentials.toml`, `.gradle/gradle.properties`, `.m2/settings.xml` |
+| Containers/sync | `.docker/config.json`, `.config/containers/auth.json`, `.config/rclone/rclone.conf` |
+| Python | Poetry auth and pip configuration in Linux/macOS conventional locations |
+| Encryption | `.config/sops/age`, `.config/age` |
+| Browsers/private apps | Chrome, Chromium, Firefox, Safari, Mail, Messages, private keychain files |
+| History/project secrets | Common shell/interpreter histories, `${CWD}/.env`, `${CWD}/.env.local` |
 
-These are fixed paths, not a recursive secret search. For example, nested `.env`
-files and arbitrary `production.env` files are not automatically added to the
-deny list. In open mode, copies of credentials outside these paths may remain
-readable. In closed mode, accessibility additionally depends on grants.
+These are fixed locations, not a recursive secret scan. Nested `.env` files,
+custom XDG/tool locations, environment-selected credential files, and copied
+secrets can remain accessible. Add explicit denies for project-specific locations.
 
-The selected lilbox config directory and every file in the inheritance chain
-(including each canonical symlink target) are denied, even with `protect_credentials = false`.
-On Linux, absent paths are omitted from this set at startup as described above.
-Ancestors of denied paths cannot be unlinked/renamed by the sandboxed process.
+Configuration protection is independent of `protect_credentials`: the global
+config directory, loaded sources/targets, and `${CWD}/.lilbox/profile.toml` remain
+denied. `.lilbox/tmp` is intentionally writable when selected as scratch.
 
-When credential protection is enabled **and** networking is denied, the renderer
-explicitly denies these `mach-lookup` global names:
+## Linux bubblewrap permissions
 
-```text
-com.apple.SecurityServer
-com.apple.securityd
-com.apple.securityd.xpc
-com.apple.security.agent
-```
+### Linux filesystem grants
 
-Turning off credential protection removes the built-in path list and these
-explicit service denies. It does not turn closed mode into open mode, remove
-custom denies, or remove lilbox configuration protection.
+Open mode binds the host root; closed mode mounts only existing grant roots.
+Mounts are parent-first, followed by inaccessible file/directory masks for denies.
+Synthetic private tmpfs storage is not a host read/write grant. Explicit child
+grants are mounted after their parents; `/proc`, `/dev`, and `/sys` are reserved.
+
+### Missing denied paths
+
+**Linux ignores denied paths absent at startup.** Notices show at most three paths
+plus a remainder count. No host placeholders are created, and absent denies do
+not freeze their parents. A matching name created later can be accessible if its
+parent is granted. macOS retains future-path denies.
+
+This includes a missing `.lilbox/profile.toml`: Linux cannot protect its future
+creation using the existing mount backend. Create and review the local policy
+outside the sandbox before granting an untrusted agent that project. Existing
+local policies are masked and protected against ancestor renames.
+
+### Linux runtime isolation
+
+- User/PID/IPC/UTS namespaces; capabilities dropped; namespace/mount changes denied.
+- Private proc/dev/sys views; synthetic root read-only in closed mode.
+- ABI-checked seccomp on x86_64/aarch64; unsupported ABIs refuse execution.
+- Ptrace/process_vm, kernel keyring, io_uring, BPF, handle-based opens, and terminal
+  injection are blocked. `clone3` returns ENOSYS for a filtered `clone` fallback.
+- Standard I/O remains inherited; other descriptors are closed except backend-owned
+  policy/mask descriptors consumed by bubblewrap.
+
+### Linux networking and certificates
+
+`network="allow"` permits TCP/UDP and shares host networking. `network="deny"`
+uses a private network namespace and denies socket/socketpair creation except
+route-netlink needed for bubblewrap setup. Online `runtime.service_ipc=false`
+blocks AF_UNIX and AF_VSOCK socket creation, including abstract Unix endpoints.
+Anonymous socketpairs remain available for child-to-child IPC when online.
+
+System CA files come from system read grants. Public CA variables do not grant
+access to custom bundles. TLS verification is never disabled.
+
+## Service IPC and macOS trust
+
+`runtime.service_ipc=false` is independent of TCP/UDP policy:
+
+| Platform | Restrictions |
+| --- | --- |
+| Linux | Blocks new Unix/VM service sockets through seccomp. |
+| macOS | Blocks named Unix bind/connect/inbound operations; restricts Mach lookups to directory lookup and, online, DNS/public-trust services. |
+
+Both remove common D-Bus, SSH/GPG-agent, Docker, and container service environment
+pointers, even if kept or assigned. This is not a general IPC or localhost-network
+ban; inherited standard I/O and anonymous child IPC remain capabilities.
+
+`runtime.keychain=false` additionally blocks macOS security/keychain Mach services.
+It can break public trust-root discovery and saved logins. The online default keeps
+it true: direct keychain-file denies do **not** promise complete service-mediated
+keychain isolation. Linux rejects an explicit false setting as unsupported.
 
 ## Environment rules
 
-### Sensitive variables
+`keep` and `drop` match whole names case-insensitively:
 
-When inheriting an environment, matching uses the uppercase variable name. The
-following are scrubbed unless explicitly included by `keep` or supplied by `set`:
-
-| Match type | Patterns/names |
+| Pattern | Meaning |
 | --- | --- |
-| Contains any substring | `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `APIKEY`, `PRIVATE_KEY`, `CREDENTIAL`, `ACCESS_KEY`, `AUTH` |
-| Starts with | `AWS_`, `AZURE_`, `GOOGLE_`, `GCLOUD_`, `OPENAI_`, `ANTHROPIC_`, `COHERE_`, `HUGGING_FACE_`, `HUGGINGFACE_` |
-| Exact name | `SSH_AGENT_PID`, `SSH_CONNECTION`, `SSH_CLIENT`, `GPG_AGENT_INFO`, `KRB5CCNAME`, `DOCKER_HOST`, `KUBECONFIG`, `DATABASE_URL`, `REDIS_URL`, `HF_TOKEN` |
+| `NAME` | Exact name. |
+| `PREFIX*` | Prefix. |
+| `*_API_KEY` | Suffix. |
+| `*SECRET*` | Substring. |
+| `APP_?` | Exactly one character after `APP_`. |
 
-`AWS_CA_BUNDLE` is an explicit exception to the AWS prefix filter because it is a
-trust-bundle path. For example, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GITHUB_TOKEN`,
-and `SSH_AUTH_SOCK` are removed by these rules; the last matches the `AUTH` substring.
-The filter is name-based and cannot recognize every secret in an arbitrary value.
+Patterns contain ASCII letters, digits, underscores, `*`, and `?`; maximum 256
+bytes. They cannot start with a literal digit. No regexes, character classes,
+brace expansion, or escaping. Values are never scanned by glob matching.
 
-### Injection variables
+Environment construction:
 
-These are always removed from inherited variables, even if named in `keep`.
-Assignments to them in `environment.set` are rejected:
+1. Retain explicit keeps and, when enabled, inherited non-sensitive names.
+2. Unconditionally remove loader/interpreter/shell injection hooks.
+3. Drop inherited proxy URLs containing userinfo unless
+   `environment.keep_proxy_credentials=true`; even explicit keeps obey this switch.
+4. Apply exact-name `environment.set` assignments. Injection assignments fail.
+5. Apply explicit drops and disabled-service environment restrictions.
+6. Normalize mandatory launch context.
 
-| Match type | Patterns/names |
+`keep` never synthesizes a missing value. `drop` wins over keep/set. Explicit
+assignments are user-supplied and may contain proxy credentials; values remain hidden.
+
+Sensitive-name inheritance filtering matches `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD`, `API_KEY`, `APIKEY`, `PRIVATE_KEY`, `CREDENTIAL`, `ACCESS_KEY`, or `AUTH`
+anywhere; cloud/agent prefixes and selected credential pointer names are also
+filtered. `AWS_CA_BUNDLE` is a public-trust exception. See
+[environment.rs](../src/environment.rs) for the exact inventory.
+
+Injection patterns include `LD_*`, `DYLD_*`, `BASH_FUNC_*`, Git configuration
+injection, interpreter hooks such as `NODE_OPTIONS`/`PYTHONPATH`, shell startup
+hooks, and askpass variables. `profile show --all` lists every pattern.
+
+| Mandatory variable | Final behavior |
 | --- | --- |
-| Starts with | `DYLD_`, `LD_`, `BASH_FUNC_`, `GIT_CONFIG_KEY_`, `GIT_CONFIG_VALUE_` |
-| Shell startup/control | `ENV`, `BASH_ENV`, `ZDOTDIR`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`, `IFS` |
-| Node/Python | `NODE_OPTIONS`, `NODE_PATH`, `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP` |
-| Ruby/Perl | `RUBYOPT`, `RUBYLIB`, `PERL5OPT`, `PERL5LIB` |
-| Java | `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS` |
-| Git / askpass | `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_ASKPASS`, `SSH_ASKPASS` |
-
-`keep` and `drop` accept exact names or a trailing `*` prefix match, with
-case-insensitive matching. `drop` wins over ordinary inherited, kept, and set
-values. It does not prevent the final mandatory-context normalization below.
-`keep` only keeps values already present in the parent environment.
-
-### Mandatory context and scratch variables
-
-| Variable | Final behavior in both shipped profiles |
-| --- | --- |
-| `HOME` | Parent's absolute home path. No filesystem grant is implied. |
-| `PWD` | Launch CWD. |
-| `LILBOX` | `1`. |
-| `PATH` | Filter inherited/set PATH; if absent, use `/usr/bin:/bin:/usr/sbin:/sbin`. `isolated` does not keep the parent PATH. |
-| `TMPDIR`, `TMP`, `TEMP` | Set to `~/.cache/lilbox/tmp` because both shipped profiles enable temporary storage. |
+| `HOME`, `PWD`, `LILBOX` | Actual home, launch directory, and `1`. |
+| `PATH` | Remove relative, empty, CWD, and `..` entries; absent value uses system paths. |
+| `TMPDIR`, `TMP`, `TEMP` | Selected scratch path, or absent when disabled. |
 | `OLDPWD` | Removed. |
 
-PATH filtering removes empty and relative entries, exact CWD entries, and entries
-containing `..`. It does not canonicalize each PATH entry or remove every possible
-symlink alias of CWD. If a supplied PATH is filtered down to empty, it stays empty.
-Mandatory context is applied after `drop`; for example, dropping HOME does not
-prevent lilbox from setting its normalized HOME.
+PATH filtering does not canonicalize every entry. Environment settings never grant
+filesystem access. Supported shells receive no-user-startup flags where available;
+system startup files and explicit user-provided overrides remain possible.
 
-Scratch is a persistent directory shared across profiles for that home. It is
-created with mode 0700; an existing final directory must be owned by the effective
-user, not a symlink, and have no group/other permissions. If temporary storage is
-disabled in a custom profile, TMPDIR/TMP/TEMP are removed, but open mode still
-allows filesystem access to ordinary temporary locations.
+## Temporary storage
 
-## Shared launch behavior
+Enable with `runtime.temporary_directory=true`; choose `runtime.temp_dir`:
 
-Both profiles clear and reconstruct the child environment, preserve standard I/O,
-close inherited descriptors above 2, set umask 077, and disable core dumps. All
-descendants remain subject to OS sandbox enforcement. Inherited standard I/O can
-itself expose data; it is deliberately preserved for interactive use.
-
-`lilbox shell` selects the parent SHELL (default `/bin/zsh` on macOS, `/bin/sh` on Linux) before filtering the
-child environment. Zsh/Bash/Fish receive no-user-startup flags; Sh/Dash/Ksh receive
-interactive mode with environment startup hooks removed. System startup files and
-explicit extra arguments can still affect startup. The shell path must also be
-accessible under the chosen profile.
-
-## Custom profiles and omitted fields
-
-These schema defaults apply only when a field is omitted throughout the entire
-inheritance chain. A standalone profile does not copy any shipped TOML file:
-
-| Field | Default |
+| Value | Effective storage |
 | --- | --- |
-| `version` | Required in every file; only `1` is supported. |
-| `extends` | No parent. Optional single profile name. |
-| `mode` | `"open"`. |
-| `network` | `"allow"` in open mode, `"deny"` in closed mode. |
-| `filesystem.protect_credentials` | `true`. |
-| `filesystem.allow_read`, `allow_write`, `deny` | Empty lists. |
-| `environment.inherit` | `true` in open mode, `false` in closed mode. |
-| `environment.keep`, `drop`, `set` | Empty lists/map. |
-| `runtime.basic`, `temporary_directory` | Both `false`. |
+| `auto` (default) | `${CWD}/.lilbox/tmp` if `.lilbox/` exists; otherwise private storage. |
+| `private` | Linux: fresh mode-0700 tmpfs at `/tmp/lilbox`. macOS: fresh mode-0700 `~/.cache/lilbox/private/run-*` directory. |
+| `system` | Parent system temporary directory (`TMPDIR` or platform default). Used by permissive. |
+| Directory path | Explicit reusable directory; supports ordinary path expansion. |
 
-Thus a standalone `version = 1` plus `mode = "closed"` alone grants no execution,
-filesystem, network, or basic-runtime capabilities. It cannot start an ordinary shell.
+- Project/explicit directories must be owned by the effective user, not symlinks,
+  and have no group/other permissions. Existing modes are never silently changed.
+- `system` intentionally uses shared host temporary storage without mode-0700 checks.
+- Linux private tmpfs disappears when the namespace's last process exits. It can
+  be swapped by the host; this is not a no-disk or resource-quota guarantee.
+- macOS private directories persist after exec. Each launch gets a new directory;
+  the closed default grants only that invocation's path. Remove completed `run-*`
+  directories outside lilbox after checking that no process still uses them.
+- Project/explicit paths persist and share a trust domain across runs. This is an
+  explicit convenience choice, not per-invocation isolation. Exclude `.lilbox/tmp/`
+  from version control. `temp_dir="private"` overrides project-local storage.
+- Broad custom grants or open mode can expose other disk-backed scratch directories.
+- Inspection never allocates scratch; macOS private previews use `run-PENDING`.
 
-Path entries support `~`, `${HOME}`, `${CWD}`, absolute paths, and CWD-relative
-paths. There are no globs, general variable expansion, or `..` components. Grant
-and deny aliases are resolved before launch; missing future descendants can be
-resolved, but Linux omits missing denies from enforcement. Dangling symlinks and
-other resolution failures are errors.
+## Schema defaults and inheritance
 
-Adding an allow entry never cancels an explicit deny. To intentionally replace the
-built-in deny list, disable `protect_credentials` and supply your own restrictions.
-Review the resulting native policy from the intended working directory and use
-the real host enforcement tests for changes to these semantics.
+`version=1` is required. Unknown fields/versions and invalid names fail.
+Standalone schema defaults remain `mode="open"`, credential protection on, and
+runtime/scratch disabled. Network and environment inheritance follow mode when
+omitted. Service IPC and keychain access default true; temp selection defaults auto.
 
-## Inherited profiles
+| Field type | Merge behavior |
+| --- | --- |
+| Scalars | Explicit child value overrides; omission preserves parent. |
+| Lists | Append parent then child; deduplicate exact strings. Empty lists do not clear parents. |
+| `environment.set` | Child replaces the same case-sensitive assignment key. |
 
-For example, a custom `work.toml` can extend the permissive default:
+Validate every source before merging; apply schema defaults after merging.
+Names use 1–64 ASCII letters, digits, `_`, or `-`. One parent per profile;
+cycles, repeated source targets, and depth beyond 64 fail. Changing mode alone
+does not reset inherited network/environment/runtime settings.
 
 ```toml
+# .lilbox/profile.toml — reviewed project-specific permissions
 version = 1
 extends = "default"
 
 [filesystem]
-deny = ["~/Documents/Personal"]
+deny = ["${CWD}/production.env"]
 
 [environment]
-keep = ["OPENAI_API_KEY"]
+keep = ["ANTHROPIC_API_KEY"]
+drop = ["INTERNAL_*_TOKEN"]
+
+[runtime]
+temp_dir = "private"
 ```
-
-Its filesystem, certificate services, network, environment filtering, and scratch
-rules are the effective `default` rules plus the extra path deny and authentication
-opt-in. It can still read/write ordinary files outside the workspace. Parent names
-resolve in the selected config directory; both `default` and `permissive` have embedded fallbacks.
-`isolated` must first be installed with `lilbox init` or provided locally.
-
-| Setting type | Inheritance behavior |
-| --- | --- |
-| `version` | Required and validated separately in every file. |
-| `extends` | One parent name; recursive inheritance supported, maximum 64 files. |
-| `mode`, `network`, environment inheritance, protection/runtime booleans | Explicit child value overrides; omission preserves parent value. |
-| Filesystem read/write/deny lists and environment keep/drop lists | Append parent then child; deduplicate exact strings. Empty child lists preserve the parent. |
-| `environment.set` | Merge by case-sensitive variable name; child overrides the same key. |
-| Unspecified fields | Apply schema defaults after merging all ancestors. |
-
-Inheritance is configuration reuse, not an immutable security boundary. A child can
-explicitly change `protect_credentials`, mode, network, or environment inheritance.
-Inherited explicit deny/drop list entries remain in force; new grants/keeps cannot
-cancel them. Disable `protect_credentials` to remove the built-in credential list,
-but this does not remove inherited explicit denies. There is no list subtraction
-or multiple-parent ordering. Use a standalone profile or change the parent when
-inherited list entries must be removed.
-
-For a child of `default`, `mode = "closed"` alone retains the parent's explicit
-network allow, environment inheritance, and temporary storage. Start from
-`isolated` or explicitly override those settings for an offline baseline. Defaults
-that were never explicitly set are determined by the final mode.
-
-All relative paths and `${CWD}` entries, including those from ancestors, resolve
-against the launch CWD. The entire config directory and all contributing profile
-files (lexical and canonical paths) are denied regardless of credential protection,
-subject to Linux omission of absent paths at startup.
-This includes parents symlinked into a separate dotfiles checkout. Ancestor rename
-protection applies to these targets too. Resolution remains a launch-time snapshot.
-
-Invalid names, missing parents, invalid TOML/types/versions, cycles by name or
-canonical file target, and excessive depth prevent launching. `lilbox check`
-inspects every local TOML file plus default and permissive; `lilbox -p work check` checks only the
-selected chain. Missing `isolated` is not an error unless selected or inherited.
-A malformed dependency stops analysis of that effective profile, but other profiles
-are still checked. Scalar/key overrides are intentional, not conflicts.
-
-The check report includes shadowed grants, effective denies and subdirectory
-exclusions, overlapping keep/drop patterns, dropped assignments, runtime-injection
-keeps, normalization of reserved variables, broad closed-mode grants, inaccessible
-CWD/scratch paths, unsafe existing scratch permissions, and closed-mode runtime
-settings. Warnings describe deterministic precedence, and do not change permissions
-or block launching. `check --strict` makes warnings fail the check. Static checks
-use current path aliases and do not probe actual network connections, certificate
-contents, kernel policy compilation, or executable dependencies.
-
-## Example profile gallery
-
-The [examples guide](../examples/README.md) describes five editable profiles and
-how to try or install them with their dependencies:
-
-- [work](../examples/work.toml) extends default with private-path denies and
-  environment drops; [codex](../examples/codex.toml) extends work with an API-key
-  opt-in and another deny.
-- [work-offline](../examples/work-offline.toml) retains work's open filesystem,
-  overrides networking to deny, adds proxy drops, and overrides one environment
-  assignment while preserving the others.
-- [workspace-offline](../examples/workspace-offline.toml) is a standalone closed
-  profile with system reads, CWD writes, explicit secret-file denies, basic runtime,
-  scratch storage, and a small environment keep list.
-- [workspace-online](../examples/workspace-online.toml) inherits that closed
-  filesystem and runtime, permits network/native trust services, and adds explicit
-  proxy/CA-variable keeps. Custom CA files may require additional read grants.
-
-These examples are included in release archives but are not installed by `init`.
-All retain credential protection; see the gallery for their effective boundaries.
-
-## Human-readable inspection and permission queries
-
-`lilbox profile show` groups effective access into filesystem, environment, and
-runtime sections. Lists show three entries and a remainder count; `--all` expands
-them. `--origins` labels scalar overrides and the original contributing profile for
-each list item, including embedded fallbacks, schema defaults, and built-in rules.
-Merged raw source documents retain that provenance. Assignment names are shown,
-but values are always hidden. Both lexical and canonical path aliases can appear.
-
-`lilbox profile cani read-path PATH`, `write-path PATH`, and `execute-path PATH`
-resolve the requested path exactly like a profile rule and check active denies
-before grants/baselines. `read-env NAME` uses the actual environment construction
-rules with a hypothetical parent variable; keep does not synthesize a real value.
-`network` tests the global allow/deny setting and accepts no endpoint argument.
-
-Answers are static: ALLOW returns 0, DENY/INDETERMINATE returns 1, malformed CLI
-arguments return 2. No queried operation is executed. Host permissions and file
-existence may still prevent access. Execution requires accessible dependencies.
-Write queries concern data writes/ordinary creation, not rename/unlink, atomic
-replacement, or metadata operations. Native special-device/runtime rules can
-return INDETERMINATE. Use `policy` for complete native rules. Color is automatic
-on terminals; `--color always|never` overrides it for these inspection commands.

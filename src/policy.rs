@@ -35,6 +35,19 @@ pub const CREDENTIAL_PATHS: &[&str] = &[
     "~/.git-credentials",
     "~/.vault-token",
     "~/.terraform.d/credentials.tfrc.json",
+    "~/.cargo/credentials",
+    "~/.cargo/credentials.toml",
+    "~/.gradle/gradle.properties",
+    "~/.m2/settings.xml",
+    "~/.config/containers/auth.json",
+    "~/.config/rclone/rclone.conf",
+    "~/.config/pypoetry/auth.toml",
+    "~/.config/pip/pip.conf",
+    "~/.pip/pip.conf",
+    "~/Library/Application Support/pypoetry/auth.toml",
+    "~/Library/Application Support/pip/pip.conf",
+    "~/.config/sops/age",
+    "~/.config/age",
     "~/Private",
     "~/Library/Keychains",
     "~/Library/Group Containers/2BUA8C4S2C.com.1password",
@@ -61,7 +74,7 @@ pub struct ContextPaths {
     pub cwd: PathBuf,
     /// Selected configuration directory, denied subject to Linux's existence check.
     pub config: PathBuf,
-    /// Persistent per-user scratch directory, granted only when requested.
+    /// Selected scratch path; private macOS previews use a launch-time placeholder.
     pub temporary: PathBuf,
 }
 
@@ -84,6 +97,12 @@ pub struct Policy {
     pub basic_runtime: bool,
     /// Enables shared path denies and backend-specific credential restrictions.
     pub protect_credentials: bool,
+    /// Suppress Unix service IPC independently of Internet sockets.
+    pub service_ipc: bool,
+    /// Whether macOS security/keychain services may be reached.
+    pub keychain: bool,
+    /// Mount a fresh Linux tmpfs here; no host directory is created or reused.
+    pub temporary_tmpfs: Option<PathBuf>,
 }
 
 impl Policy {
@@ -118,6 +137,9 @@ impl Policy {
             ignored_denies: BTreeSet::new(),
             basic_runtime: profile.runtime.basic,
             protect_credentials: profile.filesystem.protect_credentials,
+            service_ipc: profile.runtime.service_ipc,
+            keychain: profile.runtime.keychain,
+            temporary_tmpfs: None,
         };
         for (inputs, output) in [
             (&profile.filesystem.allow_read, &mut policy.read),
@@ -136,8 +158,20 @@ impl Policy {
         // Protect configuration against changes that weaken later runs. Linux
         // omits this exclusion if the directory is absent at startup.
         policy.deny.extend(path_aliases(&paths.config)?);
+        // Protect an existing project policy even when -p selected another profile.
+        // Linux's documented absent-deny limitation also applies to this pathname.
+        policy
+            .deny
+            .extend(path_aliases(&paths.cwd.join(".lilbox/profile.toml"))?);
         if profile.runtime.temporary_directory {
             policy.write.extend(path_aliases(&paths.temporary)?);
+            let mut scratch_paths = paths.clone();
+            if cfg!(target_os = "linux")
+                && crate::temporary::select(profile, &mut scratch_paths)?
+                    == crate::temporary::Kind::Private
+            {
+                policy.temporary_tmpfs = Some(paths.temporary.clone());
+            }
         }
         Ok(policy)
     }
@@ -151,6 +185,11 @@ fn path_text(path: &Path) -> Result<&str> {
 /// Expand the supported home/CWD prefixes and resolve both filesystem spellings.
 /// Relative paths use launch CWD, including paths inherited from another profile.
 pub fn resolve_path(input: &str, paths: &ContextPaths) -> Result<BTreeSet<PathBuf>> {
+    path_aliases(&expand_path(input, paths)?)
+}
+
+/// Expand a configured path while retaining the selected spelling for validation.
+pub fn expand_path(input: &str, paths: &ContextPaths) -> Result<PathBuf> {
     if input.is_empty() {
         bail!("empty policy path");
     }
@@ -171,7 +210,7 @@ pub fn resolve_path(input: &str, paths: &ContextPaths) -> Result<BTreeSet<PathBu
         }
         paths.cwd.join(input)
     };
-    path_aliases(&expanded)
+    Ok(expanded)
 }
 
 /// Keep both spellings: /tmp and /private/tmp, symlink targets, and not-yet-created

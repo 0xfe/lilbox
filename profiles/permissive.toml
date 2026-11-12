@@ -15,7 +15,10 @@ inherit = true
 # Explicitly pass an otherwise scrubbed variable, only if you trust the agent:
 # keep = ["ANTHROPIC_API_KEY"]
 keep = []
-drop = []
+drop = ["DBUS_SESSION_BUS_ADDRESS"]
+keep_proxy_credentials = false
 
 [runtime]
 temporary_directory = true
+temp_dir = "system"
+service_ipc = true

@@ -16,8 +16,10 @@ deny = ["${CWD}/secrets", "${CWD}/production.env"]
 
 [environment]
 inherit = false
-keep = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TZ"]
+keep = ["TERM", "COLORTERM", "LANG", "LC_*", "TZ"]
 
 [runtime]
 basic = true
 temporary_directory = true
+temp_dir = "auto"
+service_ipc = false

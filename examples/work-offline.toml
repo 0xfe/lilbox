@@ -1,5 +1,5 @@
 # Multi-level inheritance with scalar and map-key overrides.
-# Copy work.toml alongside this file. Filesystem access remains broadly open.
+# Copy work.toml alongside this file. Filesystem grants remain those of the closed coding default.
 version = 1
 extends = "work"
 network = "deny"

@@ -21,12 +21,15 @@ is a historical implementation/verification record.
   provenance tracking, and explicit preserve/versioned/overwrite initialization.
 - `src/check.rs`: read-only profile discovery and configuration/precedence diagnostics.
 - `src/policy.rs`: portable policy, path expansion/canonicalization, credential list.
+- `src/discovery.rs`: optional bounded filename-only project-secret inventory.
 - `src/display.rs`: terminal-safe formatting, colors, and native policy indentation.
 - `src/inspect.rs`: effective profile summaries, origins, and static cani queries.
 - `src/environment.rs`: environment filtering/normalization and shell arguments.
 - `src/backend/`: backend interface, Seatbelt rendering/runtime SBPL, and Linux
   bubblewrap mount planning plus seccomp filtering.
-- `src/launch.rs`: private scratch directory and hardened Unix process replacement.
+- `src/launch.rs`: scratch validation and hardened Unix process replacement.
+- `src/temporary.rs`: side-effect-free scratch selection and launch-only allocation.
+- `src/trust.rs`: descriptor-backed profile identity and ownership/mode validation.
 - `profiles/`: shipped TOML files embedded into the executable.
 - `examples/`: annotated standalone/inherited profiles; validate with
   `just run --config-dir examples check --strict` when changing the gallery.
@@ -63,7 +66,10 @@ just install /custom/prefix    # writes PREFIX/bin/lilbox
 `lilbox init` writes missing default/permissive/isolated profiles and AGENTS.md.
 Ordinary init preserves existing files; `--versioned` writes inactive versioned
 alternatives and `--overwrite-profiles` explicitly replaces regular shipped files.
-Default inherits permissive; both have embedded fallbacks. Prefer temporary homes/config directories for tests;
+Default inherits isolated; all three profiles have embedded fallbacks.
+`profiles/macos/` and `profiles/linux/` contain the native closed starters; init
+selects them at compile time. CWD/.lilbox/profile.toml overrides default unless -p
+is set. Prefer temporary homes/config directories for tests;
 do not modify real credentials or user profiles as test fixtures.
 
 ## Testing
@@ -72,6 +78,7 @@ do not modify real credentials or user profiles as test fixtures.
 just check                    # formatting, Clippy -D warnings, portable tests
 just test-sandbox             # current macOS/Linux host enforcement tests
 just verify                   # check + test-sandbox
+just audit                    # online OSV advisory gate (also required by CI/releases)
 ```
 
 For changes to permissions, path handling, environment rules, process launch, or
@@ -111,7 +118,7 @@ contents change. Finish with `git diff --check` and review the diff.
 - Preserve native TLS certificate discovery in online profiles. Blocking
   SecurityServer/securityd blocks public trust roots too. Never work around TLS
   failures by disabling certificate verification.
-- Keep inherited proxy and public CA settings usable in the permissive default;
+- Keep ordinary proxy and public CA settings usable in the online default;
   retain secret/injection filtering and explicit drop precedence.
 - Do not imply that private-keychain file denial blocks all service-mediated
   keychain access. Document the actual boundary.
@@ -162,7 +169,7 @@ publish a release merely to test automation.
 Installer tests build and install the native executable into temporary homes and
 prefixes, covering `init` without clobbering existing configs, terminal output,
 and failure recovery. The installer asks via /dev/tty before overwriting existing
-shipped profiles/guide, preserves versioned alternatives on decline/no terminal,
+each shipped profile/guide separately, preserves versioned alternatives on decline/no terminal,
 and accepts --overwrite-profiles for explicit replacement. It initializes after
 replacing the executable; initialization failure must report a partial install and exit
 nonzero. Keep CI's `scripts/test_release.py --binary PATH` pointing at its native
@@ -204,6 +211,12 @@ resolution, backend behavior, execution, or release packaging changes. Update
 README for user-facing command/configuration changes. Keep this AGENTS.md aligned
 with build/test/release commands, and preserve release packaging of the docs.
 Describe effective permissions and their limitations, not just profile fields.
+
+## Documentation style
+
+Don't write long verbose paragraphs. Write well structured human readable technical
+docs -- use bullets, tables, code blocks, examples, and simple clear short sentences. The
+README should be light and high-level, and details can be in the docs/ directory.
 
 ## Coding style
 

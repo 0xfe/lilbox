@@ -27,6 +27,12 @@ VERSION = '0.3.0'
 REAL_BINARY = None
 
 
+def profile_source(name):
+    """Match compile-time profile selection of the real native fixture binary."""
+    platform = 'macos' if sys.platform == 'darwin' else 'linux'
+    return ROOT / 'profiles' / (name if name == 'permissive.toml' else platform + '/' + name)
+
+
 class ScriptsTest(unittest.TestCase):
     """Run the piped installer against local archives and stubbed download tools."""
     # Create an isolated home, local assets, and fake platform/download commands.
@@ -274,7 +280,7 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         config = self.home / '.config/lilbox'
         for name in ('default', 'permissive', 'isolated'):
-            self.assertEqual((config / f'{name}.toml').read_bytes(), (ROOT / 'profiles' / f'{name}.toml').read_bytes())
+            self.assertEqual((config / f'{name}.toml').read_bytes(), profile_source(f'{name}.toml').read_bytes())
         custom = config / 'default.toml'
         custom.write_text('# Handwritten profile; must survive upgrades.\n')
         original = custom.stat()
@@ -284,11 +290,11 @@ esac
         result = self.install('--version', version)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(custom.read_text(), '# Handwritten profile; must survive upgrades.\n')
-        self.assertEqual((config / f'default.toml.{version}').read_bytes(), (ROOT / 'profiles/default.toml').read_bytes())
+        self.assertEqual((config / f'default.toml.{version}').read_bytes(), profile_source('default.toml').read_bytes())
         self.assertEqual(custom.stat().st_mtime_ns, original.st_mtime_ns)
         self.assertEqual(custom.stat().st_ino, original.st_ino)
         self.assertEqual(extra.read_text(), '# Custom named profile.\n')
-        self.assertEqual((config / 'isolated.toml').read_bytes(), (ROOT / 'profiles/isolated.toml').read_bytes())
+        self.assertEqual((config / 'isolated.toml').read_bytes(), profile_source('isolated.toml').read_bytes())
         output = result.stdout.decode()
         for expected in (str(config), str(self.prefix / 'bin/lilbox'), 'existing files preserved',
                          'lilbox check', 'lilbox shell', 'lilbox codex', 'export PATH=', '+-------+'):
@@ -371,7 +377,7 @@ esac
             os.execve('/bin/sh', ['sh', str(ROOT / 'install.sh'), '--prefix', str(self.prefix),
                                  '--version', version], self.env)
         chunks = bytearray()
-        answered = False
+        answered = 0
         finished = False
         try:
             deadline = time.monotonic() + 15
@@ -387,9 +393,10 @@ esac
                 if not chunk:
                     break
                 chunks.extend(chunk)
-                if not answered and b'[y/N]' in chunks:
-                    os.write(master, reply.encode() + b'\n')
-                    answered = True
+                while chunks.count(b'[y/N]') > answered:
+                    choice = reply[answered] if isinstance(reply, list) else reply
+                    os.write(master, choice.encode() + b'\n')
+                    answered += 1
             else:
                 self.fail('installer terminal prompt timed out')
             _, status = os.waitpid(pid, 0)
@@ -414,13 +421,31 @@ esac
         self.interactive_install(version, 'n')
         for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
             self.assertEqual((config / name).read_text(), 'user custom file')
-            source = ROOT / ('docs/LILBOX-AGENTS.md' if name == 'AGENTS.md' else 'profiles/' + name)
+            source = (ROOT / 'docs/LILBOX-AGENTS.md') if name == 'AGENTS.md' else profile_source(name)
             self.assertEqual((config / f'{name}.{version}').read_bytes(), source.read_bytes())
         self.interactive_install(version, 'yes')
         for name in ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md'):
-            source = ROOT / ('docs/LILBOX-AGENTS.md' if name == 'AGENTS.md' else 'profiles/' + name)
+            source = (ROOT / 'docs/LILBOX-AGENTS.md') if name == 'AGENTS.md' else profile_source(name)
             self.assertEqual((config / name).read_bytes(), source.read_bytes())
         self.assertEqual((config / 'work.toml').read_text(), 'custom named profile')
+
+    # One response must affect exactly one file; preserve both neighboring decisions.
+    def test_profile_overwrite_prompt_mixed_choices(self):
+        version = self.real_archive()
+        config = self.home / '.config/lilbox'
+        config.mkdir(parents=True)
+        names = ('default.toml', 'permissive.toml', 'isolated.toml', 'AGENTS.md')
+        for name in names:
+            (config / name).write_text('user custom file')
+        output = self.interactive_install(version, ['yes', 'n', 'yes', 'n'])
+        self.assertEqual(output.count(b'[y/N]'), 4)
+        for index, name in enumerate(names):
+            if index % 2 == 0:
+                self.assertEqual((config / name).read_bytes(), profile_source(name).read_bytes())
+                self.assertFalse((config / f'{name}.{version}').exists())
+            else:
+                self.assertEqual((config / name).read_text(), 'user custom file')
+                self.assertTrue((config / f'{name}.{version}').is_file())
 
     # Explicit overwrite must work without a terminal and leave custom names alone.
     def test_overwrite_profiles_flag_replaces_shipped_files(self):
@@ -431,11 +456,33 @@ esac
         (config / 'AGENTS.md').write_text('custom guide')
         result = self.install('--version', version, '--overwrite-profiles')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((config / 'default.toml').read_bytes(), (ROOT / 'profiles/default.toml').read_bytes())
+        self.assertEqual((config / 'default.toml').read_bytes(), profile_source('default.toml').read_bytes())
         self.assertEqual((config / 'AGENTS.md').read_bytes(), (ROOT / 'docs/LILBOX-AGENTS.md').read_bytes())
         self.assertFalse((config / f'default.toml.{version}').exists())
 
 
+
+
+class DependencyAuditTest(unittest.TestCase):
+    """Exercise the advisory gate offline with API-shaped fixtures."""
+    def test_active_withdrawn_and_incomplete_results(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('dependency_audit', ROOT / 'scripts/audit-dependencies.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        lock = '\n'.join(['version = 4', '[[package]]', 'name = "example"',
+                           'version = "1.0.0"', 'source = "registry+https://github.com/rust-lang/crates.io-index"'])
+        def response(path, payload=None):
+            if path == 'querybatch':
+                return {'results': [{'vulns': [{'id': 'ACTIVE'}, {'id': 'WITHDRAWN'}]}]}
+            return {'id': path.split('/')[-1], 'withdrawn': '2026-01-01' if path.endswith('WITHDRAWN') else None}
+        self.assertEqual(module.audit(lock, response), [('example', '1.0.0', 'ACTIVE')])
+        with self.assertRaises(ValueError):
+            module.audit(lock, lambda *args: {'results': []})
+        with self.assertRaises(ValueError):
+            module.audit(lock, lambda *args: {'results': [{'next_page_token': 'more'}]})
+        with self.assertRaises(ValueError):
+            module.packages('version = 4')
 
 
 class InstallerUploadTest(unittest.TestCase):

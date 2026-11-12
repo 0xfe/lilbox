@@ -64,6 +64,26 @@ impl Backend for Seatbelt {
             Network::Allow => output.push_str("(allow network*)\n"),
             Network::Deny => output.push_str("(deny network*)\n"),
         }
+        if !policy.service_ipc {
+            // Deny named Unix endpoints even in open mode. Anonymous socketpairs
+            // remain usable for communication between the target's own children.
+            output.push_str("(deny network-outbound (remote unix-socket))\n(deny network-bind network-inbound (local unix-socket))\n");
+            // Retain only directory lookup and online public-trust services.
+            output.push_str("(deny mach-lookup (require-not (require-any (global-name \"com.apple.system.opendirectoryd.libinfo\")");
+            if policy.network == Network::Allow {
+                for service in [
+                    "com.apple.mDNSResponder",
+                    "com.apple.trustd",
+                    "com.apple.trustd.agent",
+                    "com.apple.SecurityServer",
+                    "com.apple.securityd",
+                    "com.apple.securityd.xpc",
+                ] {
+                    write!(output, " (global-name \"{service}\")")?;
+                }
+            }
+            output.push_str(")))\n");
+        }
         if policy.mode == Mode::Closed && policy.network == Network::Allow {
             // DNS and native TLS trust lookup need system services as well as
             // sockets. securityd/SecurityServer serve public roots too; blocking
@@ -94,7 +114,7 @@ impl Backend for Seatbelt {
         // Online profiles must retain native certificate discovery. These
         // services cannot be denied wholesale while preserving that API.
         // Direct access to credential files remains governed by filesystem rules.
-        if policy.protect_credentials && policy.network == Network::Deny {
+        if !policy.keychain || (policy.protect_credentials && policy.network == Network::Deny) {
             output.push_str("(deny mach-lookup\n  (global-name \"com.apple.SecurityServer\")\n  (global-name \"com.apple.securityd\")\n  (global-name \"com.apple.securityd.xpc\")\n  (global-name \"com.apple.security.agent\"))\n");
         }
         Ok(output)

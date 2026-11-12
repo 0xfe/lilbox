@@ -3,7 +3,9 @@
 
 use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
-use lilbox::{backend, check, config, display, environment, inspect, launch, policy::ContextPaths};
+use lilbox::{
+    backend, check, config, display, environment, inspect, launch, policy::ContextPaths, temporary,
+};
 use std::{
     ffi::OsString,
     io::{IsTerminal, Write},
@@ -25,12 +27,15 @@ struct Cli {
     /// Print version
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
-    /// Profile name (launch default: default; check default: all profiles)
+    /// Global profile name (overrides CWD/.lilbox/profile.toml; otherwise default)
     #[arg(short, long, global = true)]
     profile: Option<String>,
     /// Override ~/.config/lilbox (or $XDG_CONFIG_HOME/lilbox)
     #[arg(long, value_name = "DIR", global = true)]
     config_dir: Option<PathBuf>,
+    /// Accept intentionally shared profile ownership/modes (identity checks remain active)
+    #[arg(long, global = true)]
+    allow_shared_profiles: bool,
     /// Colorize inspection output (auto respects NO_COLOR and TERM=dumb)
     #[arg(long, value_enum, default_value = "auto", global = true)]
     color: display::Color,
@@ -50,6 +55,9 @@ enum Action {
         /// Preserve existing files and write version-suffixed alternatives
         #[arg(long)]
         versioned: bool,
+        /// Initialize only this shipped filename (repeat for multiple files)
+        #[arg(long = "file", value_name = "NAME")]
+        files: Vec<String>,
     },
     /// Show the effective native system policy with indentation and colors
     Policy,
@@ -63,6 +71,9 @@ enum Action {
         /// Treat warnings as failures too
         #[arg(long)]
         strict: bool,
+        /// Find possible project secrets by filename only; does not change policy
+        #[arg(long)]
+        secrets: bool,
     },
     /// Start an interactive $SHELL with user startup files disabled
     Shell {
@@ -89,6 +100,9 @@ enum ProfileAction {
         /// Treat warnings as failures too
         #[arg(long)]
         strict: bool,
+        /// Find possible project secrets by filename only; does not change policy
+        #[arg(long)]
+        secrets: bool,
     },
     /// Explain effective access; long lists show three entries by default
     Show {
@@ -147,6 +161,7 @@ fn run() -> Result<()> {
     if let Some(Action::Init {
         overwrite_profiles,
         versioned,
+        files,
     }) = cli.command
     {
         let mode = if overwrite_profiles {
@@ -156,7 +171,7 @@ fn run() -> Result<()> {
         } else {
             config::InitMode::Preserve
         };
-        let created = config::init_with_mode(&config_directory, mode)?;
+        let created = config::init_files(&config_directory, mode, &files)?;
         if created.is_empty() {
             println!("Existing profiles and guide preserved; no files written.");
         }
@@ -166,20 +181,25 @@ fn run() -> Result<()> {
         println!("{}", guide_note(&config_directory));
         return Ok(());
     }
-    let paths = ContextPaths {
-        temporary: home.join(".cache/lilbox/tmp"),
+    let mut paths = ContextPaths {
+        // Replaced by temporary::select before policy/environment construction.
+        temporary: home.join(".cache/lilbox/private/run-PENDING"),
         home,
         cwd: std::env::current_dir()?,
         config: config_directory,
     };
     if let Some(
-        Action::Check { strict }
+        Action::Check { strict, secrets }
         | Action::Profile {
-            command: ProfileAction::Check { strict },
+            command: ProfileAction::Check { strict, secrets },
         },
     ) = cli.command
     {
-        let report = check::analyze(&paths, cli.profile.as_deref())?;
+        let mut report =
+            check::analyze_with_options(&paths, cli.profile.as_deref(), cli.allow_shared_profiles)?;
+        if secrets {
+            report.discover_secrets(&paths.cwd);
+        }
         report.print(cli.color.enabled(false));
         if report.failed(strict) {
             bail!("configuration check failed");
@@ -188,11 +208,18 @@ fn run() -> Result<()> {
     }
     // Resolve and validate everything needed for inspection before creating
     // scratch storage or starting a process. Include inherited config protection.
-    let profile_name = cli.profile.as_deref().unwrap_or("default");
-    let loaded = config::load_resolved(&paths.config, profile_name)?;
+    let loaded = config::load_selected(
+        &paths.config,
+        Some(&paths.cwd),
+        cli.profile.as_deref(),
+        cli.allow_shared_profiles,
+    )?;
+    let profile_name = loaded.chain.last().context("missing selected profile")?;
+    let temporary_kind = temporary::select(&loaded.profile, &mut paths)?;
+    temporary::validate(temporary_kind, &paths)?;
     let policy = loaded.policy(&paths)?;
     let profile = &loaded.profile;
-    let child_environment = environment::build(profile, &paths, std::env::vars_os())?;
+    environment::build(profile, &paths, std::env::vars_os())?;
     let backend = backend::current()?;
     if !policy.ignored_denies.is_empty() {
         eprintln!(
@@ -281,12 +308,17 @@ fn run() -> Result<()> {
             unreachable!()
         }
     };
-    if profile.runtime.temporary_directory {
-        launch::prepare_temporary(&paths.temporary)?;
-    }
+    // Keep fresh scratch owned until exec. Setup errors remove it automatically;
+    // successful exec leaves disk-backed macOS scratch for explicit cleanup.
+    let _scratch = temporary::prepare(temporary_kind, &mut paths)?;
+    let policy = loaded.policy(&paths)?;
+    let child_environment = environment::build(profile, &paths, std::env::vars_os())?;
     eprintln!("{}", guide_note(&paths.config));
-    print_startup(profile_name, &argv)?;
-    launch::execute(backend.as_ref(), &policy, &argv, child_environment)
+    print_startup(
+        &format!("{} — {}", profile_name, display::safe(&loaded.selection())),
+        &argv,
+    )?;
+    launch::execute(backend.as_ref(), &policy, &argv, child_environment, &loaded)
 }
 
 /// Format a terminal-safe summary without changing the arguments used for exec.

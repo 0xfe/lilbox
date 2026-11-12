@@ -1,8 +1,9 @@
 # Security and authentication
 
 lilbox restricts commands with macOS Seatbelt or Linux bubblewrap. The default
-profile allows broad filesystem and network access, with selected credential
-paths denied and sensitive environment variables removed.
+profile is closed: it grants the workspace, coding tools, selected caches, and
+agent state while allowing network access. Permissive host access requires
+`-p permissive`.
 
 - [Credential protection](#credential-protection)
 - [Agent authentication](#agent-authentication)
@@ -26,6 +27,9 @@ The exact inventories are in the profile reference:
 - [Sensitive and injection variables](profiles.md#environment-rules)
 - [Linux mount restrictions](profiles.md#linux-bubblewrap-permissions), including
   startup omission of missing deny paths
+
+Use `lilbox check --secrets` for an optional filename-only project inventory. It
+reports candidates and skipped regions, never contents, and does not change policy.
 
 Use `filesystem.deny` and `environment.drop` for private paths or variables outside
 the built-in lists. Removing a variable does not block access to its underlying
@@ -52,7 +56,7 @@ rules still win. See [environment precedence](profiles.md#environment-rules).
 ### Use saved login state
 
 - Agent state such as `~/.codex` and `~/.claude` is not on the built-in deny list.
-  Open profiles can access it unless a custom deny applies.
+  The default explicitly grants it; permissive also exposes it unless denied.
 - Closed profiles need explicit grants for agent state and runtime files.
 - Keychain-based logins may fail in offline profiles or when direct keychain-file
   access is required.
@@ -67,7 +71,7 @@ protection remains active.
 
 | Policy | macOS | Linux |
 | --- | --- | --- |
-| `network = "allow"` | Allows network operations and native trust services. | Shares host networking, including accessible Unix sockets. |
+| `network = "allow"` | Allows network operations and native trust services, subject to runtime restrictions below. | Shares host networking; `runtime.service_ipc=false` additionally blocks Unix/VM service sockets. |
 | `network = "deny"` | Blocks Seatbelt network operations, including TCP/UDP and Unix connections. | Uses a private network namespace and blocks socket creation, including Unix sockets and socketpairs. |
 
 Linux offline mode permits route-netlink inside the private namespace for
@@ -87,8 +91,9 @@ explicitly dropped:
 | Proxies | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY`, and lowercase equivalents |
 | Certificate locations | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `AWS_CA_BUNDLE` |
 
-- Proxy URLs can contain credentials; use `environment.drop` to exclude them.
-- Closed profiles do not inherit these variables unless configured to do so.
+- Inherited proxy URLs containing userinfo are dropped unless
+  `environment.keep_proxy_credentials=true`, including when matched by `keep`.
+- The default explicitly keeps these names; isolated does not.
 - A CA environment variable grants no filesystem access. Closed profiles need
   read access to custom bundles and runtime files.
 - TLS certificate verification is never disabled.
@@ -97,13 +102,18 @@ explicitly dropped:
 
 | Situation | Behavior |
 | --- | --- |
-| Online profile | Native certificate/trust services remain accessible. Blocking SecurityServer/securityd also blocks public root discovery and can cause `UnknownIssuer` errors. |
+| Online profile with `runtime.keychain=true` | Native certificate/trust services remain accessible. Blocking SecurityServer/securityd also blocks public root discovery and can cause `UnknownIssuer` errors. |
 | Offline profile with credential protection | Common credential-service Mach lookups are denied. |
 | Private keychain files | Direct access remains denied while credential protection is enabled. |
 
 File denial does **not** block all service-mediated keychain access. Online
-programs may access keychain APIs subject to macOS authorization. On Linux,
-reachable desktop services can similarly expose secrets through Unix sockets.
+programs may access keychain APIs subject to macOS authorization. The default
+disables common service IPC separately from networking. Linux blocks
+new Unix/VM service sockets; macOS blocks named Unix endpoints and restricts Mach
+lookups. Set `runtime.service_ipc=true` only when needed.
+
+`runtime.keychain=false` additionally blocks macOS security services and may break
+native TLS discovery. Linux rejects that setting as unsupported.
 
 ## Security boundaries
 
@@ -119,11 +129,30 @@ and lilbox is not an independently audited security boundary.
 | Inherited stdin/stdout/stderr | They can expose data or an existing network capability. |
 | System shell startup files or explicit startup overrides | A shell can reload data from accessible files. |
 | A hostile parent environment | lilbox starts before it can scrub the child's environment. |
-| Cooperating unsandboxed filesystem changes | Path resolution is a launch-time snapshot. |
+| Cooperating unsandboxed filesystem changes | Source identity checks detect ordinary replacements; general path resolution still has TOCTOU limits. |
+| Unreviewed `.lilbox/profile.toml` | It is trusted policy and can widen permissions; review unfamiliar repository policies first. |
+| CPU, memory, task count, and disk exhaustion | No resource quotas beyond disabling core dumps. |
+| Project/system/explicit temporary directories | Persistent or shared by choice; use private storage for per-run separation. |
 
 Review narrow grants with `lilbox check` and `policy`. See the
 [profile reference](profiles.md) for effective permissions and the
 [design](design.md) for enforcement details.
+
+## Profile and temporary-storage integrity
+
+Profile sources and their ancestors must be user/root-owned and not group/other
+writable. Files are read through retained descriptors and revalidated before exec.
+`--allow-shared-profiles` is an explicit ownership/mode relaxation, not a repair.
+See [profile integrity](profiles.md#profile-integrity).
+
+Existing local policy files are denied even when `-p` selects another profile.
+Linux's absent-deny limitation applies to a missing `.lilbox/profile.toml`; create
+and review local policy outside the sandbox before running untrusted project code.
+
+Private Linux scratch uses per-invocation tmpfs. macOS uses separate mode-0700
+per-run directories with documented retention. Project scratch is deliberately
+persistent at `.lilbox/tmp`; permissive uses system temp. See
+[temporary storage](profiles.md#temporary-storage).
 
 ## Startup failures
 

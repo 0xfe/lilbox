@@ -212,12 +212,17 @@ in the destination directory permits atomic replacement; failed downloads/checks
 leave an existing installation intact. Destination symlinks/directories are
 rejected. After replacement, the installer invokes that exact executable's `init`
 command to install default/permissive/isolated profiles and `AGENTS.md` in
-`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Existing shipped files trigger one
+`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Each existing shipped file gets a separate
 confirmation prompt via `/dev/tty`, which works with piped installer input.
-Declining or having no usable controlling terminal invokes `init --versioned`:
+Each decision uses `init --file NAME` with overwrite or versioned mode.
+Declining or having no usable controlling terminal selects a versioned alternative:
 existing files/symlinks are preserved, and alternatives such as
 `default.toml.0.4.0` and `AGENTS.md.0.4.0` are written without clobbering prior
 alternatives. These are inactive until reviewed and renamed.
+
+The executable embeds the native `profiles/macos/` or `profiles/linux/` defaults;
+archives contain both sets. Older 0.4 binaries without `init --file` retain their
+compatible versioned/overwrite behavior without per-file prompts.
 
 Pinned pre-0.4 releases use their original non-overwriting init without the new
 flags or guide; an overwrite request for those versions is rejected before install.
@@ -234,7 +239,8 @@ downloads, checksum verification, extraction, copying, executable validation,
 installation, and profile initialization. The completion screen includes a box
 logo, executable/config paths, a quoted PATH
 command when needed, quick-start commands, and a reminder of the default profile's
-broad access. Color follows stdout's terminal status (so `curl | sh` still uses
+closed coding permissions (or the preserved installed profile's settings).
+Color follows stdout's terminal status (so `curl | sh` still uses
 color interactively), and is disabled by `NO_COLOR` (even empty) or `TERM=dumb`.
 No sudo, shell startup edits, or system package installation is performed. Missing
 Linux bubblewrap is reported with installation instructions; kernel restrictions
@@ -301,3 +307,17 @@ for details and icon provenance.
 
 See [extension points](design.md#extending-the-system) and the historical
 [implementation plan](../plan.md).
+
+## Dependency advisory gate
+
+- `just audit` queries OSV for every registry package/version in `Cargo.lock`,
+  including dependencies for other platforms. It requires network access.
+- The shared CI/release workflow fails on active advisories, API errors, or
+  incomplete responses. Withdrawn advisories do not block builds.
+- `.github/dependabot.yml` schedules Cargo and GitHub Actions updates. Repository
+  administrators separately manage GitHub alert/security-update settings.
+- No advisory exceptions are configured. If an exception is unavoidable, require
+  a reviewed change naming the advisory, unreachable API evidence, owner, and an
+  expiry of at most 30 days. Add explicit expiry enforcement before using it;
+  never disable the gate or add an unbounded ignore list.
+- Offline regression fixtures exercise active/withdrawn advisories and API errors.

@@ -1,3 +1,0 @@
-# Your default profile. Add personal overrides here; permissive holds the baseline.
-version = 1
-extends = "permissive"

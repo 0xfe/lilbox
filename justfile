@@ -34,6 +34,10 @@ test-sandbox:
 # All portable checks.
 check: lint test test-release test-www
 
+# Online vulnerability gate, also required by shared CI/release verification.
+audit:
+    python3 scripts/audit-dependencies.py
+
 # Offline installer and release automation regression tests.
 test-release:
     cargo build --locked

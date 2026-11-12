@@ -5,9 +5,9 @@ These are editable starting points. `lilbox init` installs only the shipped
 
 | Profile | Parent | Effective behavior |
 | --- | --- | --- |
-| [work.toml](work.toml) | `default` | Permissive filesystem/network with extra private-path denies, company-variable drops, and editor/pager settings. |
-| [codex.toml](codex.toml) | `work` | Adds a customer-data deny and explicitly keeps `OPENAI_API_KEY`. Demonstrates a three-profile chain. |
-| [work-offline.toml](work-offline.toml) | `work` | Keeps the open filesystem baseline, denies networking, drops proxy variables, and overrides just the pager setting. |
+| [work.toml](work.toml) | `default` | Closed coding filesystem/online network with extra private-path denies, company-variable drops, and editor/pager settings. |
+| [codex.toml](codex.toml) | `work` | Adds a customer-data deny and explicitly keeps `OPENAI_API_KEY`. Demonstrates a four-profile chain including isolated. |
+| [work-offline.toml](work-offline.toml) | `work` | Keeps the closed coding filesystem grants, denies networking, drops proxy variables, and overrides just the pager setting. |
 | [workspace-offline.toml](workspace-offline.toml) | None | Closed baseline: system reads, CWD read/write, basic runtime, and scratch storage; no networking or general environment inheritance. |
 | [workspace-online.toml](workspace-online.toml) | `workspace-offline` | Retains closed filesystem grants and denies; allows networking/native trust services and explicitly keeps proxy/CA variables. |
 
@@ -20,8 +20,13 @@ All examples keep built-in credential protection. Explicit denies, including
 CWD `.env`/`.env.local` and all configuration dependencies, override grants.
 Online profiles retain native macOS certificate service access; direct private
 keychain file access is still denied. Offline profiles also restrict the common
-credential service Mach lookups. Scratch storage is shared and persistent at
-`~/.cache/lilbox/tmp`, not an ephemeral workspace directory.
+credential service Mach lookups. Scratch uses `.lilbox/tmp` when `.lilbox/` exists, otherwise per-run private
+storage. See [temporary storage](../docs/profiles.md#temporary-storage).
+
+The all-profile strict check includes permissive and warns about its broad
+filesystem/network/environment combination. `work-offline` also warns about its
+intentional proxy drops overriding inherited keeps. Review these expected
+warnings, or select `-p work` to check only a closed example and its parents.
 
 ## Try without installing profiles
 

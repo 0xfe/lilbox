@@ -9,6 +9,7 @@ use std::{ffi::OsString, fs, path::Path};
 #[cfg(unix)]
 pub fn prepare_temporary(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
+    crate::trust::directory(path, false)?;
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -21,6 +22,7 @@ pub fn prepare_temporary(path: &Path) -> Result<()> {
 #[cfg(unix)]
 pub fn validate_temporary(path: &Path) -> Result<()> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    crate::trust::directory(path, false)?;
     let metadata = fs::symlink_metadata(path)?;
     // Do not chmod an existing directory: it may be someone else's or a symlink.
     if !metadata.is_dir()
@@ -83,6 +85,7 @@ pub fn execute(
     policy: &Policy,
     argv: &[OsString],
     environment: ChildEnvironment,
+    loaded: &crate::config::LoadedProfile,
 ) -> Result<()> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -135,6 +138,7 @@ pub fn execute(
             Ok(())
         });
     }
+    loaded.revalidate()?;
     Err(command.exec())
         .with_context(|| format!("failed to launch {} in sandbox", argv[0].to_string_lossy()))
 }
@@ -146,6 +150,7 @@ pub fn execute(
     _policy: &Policy,
     _argv: &[OsString],
     _environment: ChildEnvironment,
+    _loaded: &crate::config::LoadedProfile,
 ) -> Result<()> {
     bail!("no sandbox backend for this platform")
 }

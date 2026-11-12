@@ -41,6 +41,25 @@ pub struct Report {
 }
 
 impl Report {
+    /// Add filename-only discovery without changing any effective policy.
+    pub fn discover_secrets(&mut self, cwd: &Path) {
+        self.add(Severity::Info, "project secrets", format!("filename-only scan; no contents read; skips {:?}, .lilbox/tmp, and symlink directories; candidates may be false positives", crate::discovery::SKIPPED_DIRECTORIES));
+        let inventory = crate::discovery::scan(cwd);
+        for path in inventory.candidates {
+            self.add(
+                Severity::Warning,
+                "project secrets",
+                format!(
+                    "candidate: {}; review filesystem.deny (policy unchanged)",
+                    path.display()
+                ),
+            );
+        }
+        for error in inventory.errors {
+            self.add(Severity::Error, "project secrets", error);
+        }
+    }
+
     /// Append a finding while attaching the profile that produced it.
     fn add(&mut self, severity: Severity, profile: &str, message: impl Into<String>) {
         self.findings.push(Finding {
@@ -109,13 +128,29 @@ fn safe_text(text: &str) -> String {
 /// Check one inheritance chain or all discovered profiles without mutating files.
 /// Rendering checks backend support, not actual kernel enforcement or connectivity.
 pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
+    analyze_with_options(paths, selected, false)
+}
+
+/// Include a project-local profile in discovery and carry explicit shared-policy consent.
+pub fn analyze_with_options(
+    paths: &ContextPaths,
+    selected: Option<&str>,
+    allow_shared: bool,
+) -> Result<Report> {
     let mut report = Report::default();
     let mut names = BTreeSet::new();
     if let Some(name) = selected {
         names.insert(name.to_owned());
     } else {
         // Include the embedded fallback even when no configuration directory exists.
-        names.extend(["default".to_owned(), "permissive".to_owned()]);
+        names.extend([
+            "default".to_owned(),
+            "permissive".to_owned(),
+            "isolated".to_owned(),
+        ]);
+        if fs::symlink_metadata(paths.cwd.join(".lilbox/profile.toml")).is_ok() {
+            names.insert(".lilbox/profile.toml".into());
+        }
         match fs::read_dir(&paths.config) {
             Ok(entries) => {
                 for entry in entries {
@@ -143,18 +178,52 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
     }
     for name in names {
         report.profiles += 1;
-        let loaded = match config::load_resolved(&paths.config, &name) {
+        let loaded = match config::load_selected(
+            &paths.config,
+            Some(&paths.cwd),
+            if name == ".lilbox/profile.toml" {
+                None
+            } else {
+                Some(&name)
+            },
+            allow_shared,
+        ) {
             Ok(loaded) => loaded,
             Err(error) => {
                 report.add(Severity::Error, &name, format!("{error:#}"));
                 continue;
             }
         };
+        let mut selected_paths = paths.clone();
+        let temporary_kind = match crate::temporary::select(&loaded.profile, &mut selected_paths) {
+            Ok(kind) => kind,
+            Err(error) => {
+                report.add(Severity::Error, &name, format!("{error:#}"));
+                continue;
+            }
+        };
+        let paths = &selected_paths;
         report.add(
             Severity::Info,
             &name,
-            format!("inheritance (base → child): {}", loaded.chain.join(" → ")),
+            format!(
+                "extends: {}",
+                loaded
+                    .chain
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
         );
+        if allow_shared {
+            report.add(
+                Severity::Warning,
+                &name,
+                "--allow-shared-profiles: ownership and writable-mode checks disabled",
+            );
+        }
         for source in &loaded.sources {
             let embedded = if !source.exists() {
                 " (embedded fallback)"
@@ -207,6 +276,12 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
             profile.mode, policy.network, profile.environment.inherit.unwrap_or(profile.mode == Mode::Open),
             profile.filesystem.protect_credentials, profile.runtime.basic, profile.runtime.temporary_directory));
         check_filesystem(&mut report, &name, profile, paths, &policy);
+        if profile.mode == Mode::Open
+            && policy.network == Network::Allow
+            && profile.environment.inherit.unwrap_or(true)
+        {
+            report.add(Severity::Warning, &name, "mode=open, network=allow, environment.inherit=true: broad host filesystem, network and environment access");
+        }
         if profile.mode == Mode::Closed {
             if !profile.runtime.basic {
                 report.add(
@@ -218,29 +293,14 @@ pub fn analyze(paths: &ContextPaths, selected: Option<&str>) -> Result<Report> {
             if profile.environment.inherit == Some(true) {
                 report.add(Severity::Warning, &name, "closed mode with environment.inherit=true: non-sensitive host variables are inherited; changing mode does not reset inherited settings");
             }
-            if policy.network == Network::Allow {
-                report.add(Severity::Info, &name, "closed mode explicitly allows unrestricted networking and native trust services; inherited network settings remain effective");
-            }
         }
-        // Inspect scratch only if it exists. The check command must not create it.
-        if profile.runtime.temporary_directory {
-            match fs::symlink_metadata(&paths.temporary) {
-                Ok(_) => {
-                    if let Err(error) = crate::launch::validate_temporary(&paths.temporary) {
-                        report.add(
-                            Severity::Error,
-                            &name,
-                            format!("runtime.temporary_directory: {error:#}"),
-                        );
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => report.add(
-                    Severity::Error,
-                    &name,
-                    format!("runtime.temporary_directory: {error}"),
-                ),
-            }
+        // Validate scratch ancestry/permissions without allocating storage.
+        if let Err(error) = crate::temporary::validate(temporary_kind, paths) {
+            report.add(
+                Severity::Error,
+                &name,
+                format!("runtime.temporary_directory: {error:#}"),
+            );
         }
         // Use the same renderer as launch, but never execute its output. A present
         // launcher does not prove that this host permits namespaces or Seatbelt.
@@ -362,12 +422,9 @@ fn check_filesystem(
     }
 }
 
-/// Detect intersections between case-insensitive exact and trailing-star patterns.
+/// Use the same glob language as environment filtering for precedence diagnostics.
 fn patterns_overlap(a: &str, b: &str) -> bool {
-    let a = a.to_ascii_uppercase();
-    let b = b.to_ascii_uppercase();
-    environment::matches_pattern(a.trim_end_matches('*'), &b)
-        || environment::matches_pattern(b.trim_end_matches('*'), &a)
+    environment::patterns_overlap(a, b)
 }
 
 /// Report invalid rules and precedence surprises using names, never assigned values.
@@ -377,6 +434,13 @@ fn check_environment(report: &mut Report, name: &str, profile: &config::Profile)
         report.add(Severity::Error, name, error);
     }
     for keep in &settings.keep {
+        if !profile.runtime.service_ipc
+            && environment::SERVICE_VARIABLES
+                .iter()
+                .any(|name| environment::matches_pattern(name, &keep.to_ascii_uppercase()))
+        {
+            report.add(Severity::Warning, name, format!("environment.keep {keep:?}: runtime.service_ipc=false removes matching service pointers"));
+        }
         for drop in &settings.drop {
             if patterns_overlap(keep, drop) {
                 report.add(Severity::Warning, name, format!("environment.keep {keep:?} overlaps drop {drop:?}; drop wins for matching variables"));

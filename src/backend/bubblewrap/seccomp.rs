@@ -14,7 +14,7 @@ pub fn description(network: Network) -> &'static str {
 
 /// Refuse architectures whose syscall numbers and argument layout are unsupported.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub fn filter(_network: Network) -> Result<Vec<u8>> {
+pub fn filter(_network: Network, _service_ipc: bool) -> Result<Vec<u8>> {
     anyhow::bail!("bubblewrap syscall filtering supports only x86_64 and aarch64 Linux")
 }
 
@@ -22,7 +22,7 @@ pub fn filter(_network: Network) -> Result<Vec<u8>> {
 /// Each tuple is (opcode, true-skip, false-skip, immediate); skips are relative
 /// to the next instruction, so edits must preserve each block's branch lengths.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-pub fn filter(network: Network) -> Result<Vec<u8>> {
+pub fn filter(network: Network, service_ipc: bool) -> Result<Vec<u8>> {
     // BPF_LD | BPF_W | BPF_ABS: load a u32 from struct seccomp_data.
     const LOAD: u16 = 0x20;
     // BPF_JMP | BPF_JEQ | BPF_K: compare the accumulator to an immediate.
@@ -99,6 +99,19 @@ pub fn filter(network: Network) -> Result<Vec<u8>> {
             (LOAD, 0, 0, 0),
         ]);
     }
+    if network == Network::Allow && !service_ipc {
+        // Named and abstract Unix sockets (and VM service sockets) must not
+        // reach host services. socketpair remains private child-to-child IPC.
+        code.extend([
+            (EQ, 0, 5, libc::SYS_socket as u32),
+            (LOAD, 0, 0, 16),
+            (EQ, 0, 1, libc::AF_UNIX as u32),
+            (RET, 0, 0, DENY),
+            (EQ, 0, 1, libc::AF_VSOCK as u32),
+            (RET, 0, 0, DENY),
+            (LOAD, 0, 0, 0),
+        ]);
+    }
     // Classic BPF cannot inspect the clone3 pointer's contents. ENOSYS permits
     // libc fallback to clone, whose first argument exposes namespace flags.
     // 0x7e02_0000 covers NEWNS/NEWCGROUP/NEWUTS/NEWIPC/NEWUSER/NEWPID/NEWNET.
@@ -170,6 +183,49 @@ mod tests {
         }
     }
 
+    /// Service restrictions block named/abstract Unix and VM sockets while keeping TCP.
+    #[test]
+    fn service_ipc_is_independent_of_online_networking() {
+        #[cfg(target_arch = "x86_64")]
+        let arch = 0xc000_003e;
+        #[cfg(target_arch = "aarch64")]
+        let arch = 0xc000_00b7;
+        let bytes = filter(Network::Allow, false).unwrap();
+        for domain in [libc::AF_UNIX, libc::AF_VSOCK] {
+            assert_eq!(
+                evaluate(
+                    &bytes,
+                    arch,
+                    libc::SYS_socket as u32,
+                    [domain as u64, 1, 0, 0, 0, 0]
+                ),
+                0x0005_0000 | libc::EPERM as u32
+            );
+        }
+        assert_eq!(
+            evaluate(
+                &bytes,
+                arch,
+                libc::SYS_socket as u32,
+                [libc::AF_INET as u64, 1, 0, 0, 0, 0]
+            ),
+            0x7fff_0000
+        );
+        assert_eq!(
+            evaluate(
+                &bytes,
+                arch,
+                libc::SYS_socketpair as u32,
+                [libc::AF_UNIX as u64, 1, 0, 0, 0, 0]
+            ),
+            0x7fff_0000
+        );
+        assert_eq!(
+            evaluate(&bytes, arch, libc::SYS_read as u32, [0; 6]),
+            0x7fff_0000
+        );
+    }
+
     /// Exercise branch offsets and syscall argument checks without installing a kernel filter.
     #[test]
     fn filter_enforces_abi_network_namespace_and_terminal_boundaries() {
@@ -180,7 +236,7 @@ mod tests {
         let deny = 0x0005_0000 | libc::EPERM as u32;
         let allow = 0x7fff_0000;
         for network in [Network::Allow, Network::Deny] {
-            let bytes = filter(network).unwrap();
+            let bytes = filter(network, true).unwrap();
             let call = |nr: libc::c_long, arg0: u64, arg1: u64, arg2: u64| {
                 evaluate(&bytes, arch, nr as u32, [arg0, arg1, arg2, 0, 0, 0])
             };

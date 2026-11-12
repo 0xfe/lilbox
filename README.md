@@ -3,8 +3,9 @@
 [Website](https://mo.town/lilbox/)
 
 A small wrapper for running coding agents and untrusted commands inside an OS
-sandbox. The default profile blocks common sensitive paths such as `~/.ssh` and
-`~/.aws`, and scrubs sensitive environment variables such as API keys.
+sandbox. The default profile grants the workspace, common coding tools, agent
+state, and selected caches. It allows networking while blocking common credential
+paths and filtering environment variables.
 
 Think of it as an *outer sandbox* which serves as a defense in depth along with
 other isolation mechanisms, particularly those bundled with agent harnesses.
@@ -12,6 +13,14 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 ```sh
 # Run codex inside lilbox with the default profile
 lilbox codex
+```
+
+You can configure lilbox with your favourite coding agent using a prompt like:
+
+
+```
+Read ~/.config/lilbox/AGENTS.md and then create a new profile called "foobar" for
+the project in this directory with sane secure defaults.
 ```
 
 Version **0.4.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
@@ -37,7 +46,8 @@ Choose an alternate installation prefix or a specific release:
 ```sh
 curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
 ```
-Pass`--overwrite-profiles` to replace profiles explicitly.
+The installer asks separately before replacing each existing profile or guide.
+Declining preserves it and writes a versioned alternative. Pass `--overwrite-profiles` to replace profiles explicitly.
 
 Run your command inside lilbox.
 
@@ -47,10 +57,10 @@ lilbox claude                 # launch Claude from PATH
 lilbox shell                  # interactive shell, user startup files disabled
 ```
 
-No configuration is required. The default profile allows broad filesystem and network
-access while blocking common credential/private paths and scrubbing sensitive
-environment variables. It is **not workspace-only**: ordinary files outside the
-current directory remain writable, subject to the Linux restrictions below.
+No configuration is required. The default extends the closed `isolated` profile
+with online coding permissions. Use `-p permissive` for broad host access.
+If `.lilbox/profile.toml` exists in the current directory, it becomes the default;
+`-p NAME` overrides it. Startup displays the selected profile and its path.
 
 To configure profiles:
 
@@ -119,21 +129,25 @@ Profile lookup, in priority order:
 2. `$XDG_CONFIG_HOME/lilbox`
 3. `~/.config/lilbox`
 
-Each profile is a `NAME.toml` file. Both `default` and `permissive` have embedded
-fallbacks. The shipped `default.toml` inherits `permissive` and is the place for
-your personal overrides; existing standalone default profiles continue to work.
+Each global profile is a `NAME.toml` file. `default`, `isolated`, and `permissive`
+have embedded fallbacks. Initialization installs the native platform's defaults.
+Existing files are preserved until you explicitly replace them.
 
 | Starter | Filesystem | Network |
 | --- | --- | --- |
-| [`permissive`](profiles/permissive.toml) | Broad access, with credential/private-path denies. | Allowed |
-| [`default`](profiles/default.toml) | Inherits permissive; add personal overrides here. | Inherited |
-| [`isolated`](profiles/isolated.toml) | System reads, current-directory writes, and scratch storage. | Denied |
+| `default` | Closed; workspace, coding tools, agent state, and selected caches. | Allowed |
+| `isolated` | Closed; system tools, workspace, and scratch storage. | Denied |
+| [`permissive`](profiles/permissive.toml) | Broad host access with credential-path exclusions. | Allowed |
+
+Sources: [macOS profiles](profiles/macos/default.toml),
+[Linux profiles](profiles/linux/default.toml). Profiles require trusted ownership
+and no group/other write permission; see [profile integrity](docs/profiles.md#profile-integrity).
 
 **Linux:** denied paths that do not exist at startup are ignored for that run. Existing denies stay protected. See [Linux permissions](docs/profiles.md#missing-denied-paths).
 
 ### Customize a profile
 
-Create `~/.config/lilbox/work.toml`:
+Create `~/.config/lilbox/work.toml`, or `.lilbox/profile.toml` for this project:
 
 ```toml
 version = 1
@@ -144,7 +158,7 @@ deny = ["~/Documents/Personal"]
 
 [environment]
 keep = ["ANTHROPIC_API_KEY"]  # explicitly pass a required credential
-drop = ["MY_COMPANY_*"]
+drop = ["MY_COMPANY_*_TOKEN"]
 ```
 
 ```sh
@@ -154,21 +168,29 @@ lilbox -p work claude
 
 - Paths support absolute paths, `~/`, `${HOME}`, `${CWD}`, and paths relative to
   the launch directory. No globs or `..` components.
-- Environment patterns match exact names or a trailing `*` prefix, ignoring case.
+- Environment globs support `*` anywhere and `?` for one character, ignoring case.
 - Filesystem denies and environment drops win over grants and keeps.
 - Inheritance appends lists and overrides explicit scalar values. Changing `mode`
   alone does not reset inherited network or environment settings.
 
-For a closed baseline, extend `isolated` after running `lilbox init`. Add the
+For a closed baseline, extend `isolated`. Add the
 agent's executable, libraries, state, and authentication needs; enable networking
 if needed. See the [example gallery](examples/README.md) and
 [profile reference](docs/profiles.md) for complete configurations and merge rules.
+
+### Temporary files
+
+The default uses `.lilbox/tmp` when `.lilbox/` exists. Otherwise it uses private
+storage: a per-run Linux tmpfs or a fresh mode-0700 macOS directory.
+`permissive` uses system temp. Override with `[runtime] temp_dir = "private"`,
+`"system"`, or a directory path. See [storage and retention](docs/profiles.md#temporary-storage).
 
 ### Check a profile
 
 ```sh
 lilbox check
 lilbox -p work check --strict
+lilbox check --secrets        # optional filename-only project inventory
 ```
 
 Run checks from the intended project directory so relative paths resolve correctly.

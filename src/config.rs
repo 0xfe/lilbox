@@ -10,14 +10,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// User customization layer, inheriting the embedded permissive baseline.
-pub const DEFAULT_PROFILE: &str = include_str!("../profiles/default.toml");
+/// Platform-specific online coding profile, extending the closed isolated baseline.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_PROFILE: &str = include_str!("../profiles/macos/default.toml");
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_PROFILE: &str = include_str!("../profiles/linux/default.toml");
 /// Open baseline, also available without running init.
 pub const PERMISSIVE_PROFILE: &str = include_str!("../profiles/permissive.toml");
 /// Instructions installed beside profiles for other coding agents.
 pub const AGENT_GUIDE: &str = include_str!("../docs/LILBOX-AGENTS.md");
-/// Closed starter profile written by init; it is not an automatic fallback.
-pub const ISOLATED_PROFILE: &str = include_str!("../profiles/isolated.toml");
+/// Closed starter and embedded inheritance fallback for the current platform.
+#[cfg(target_os = "macos")]
+pub const ISOLATED_PROFILE: &str = include_str!("../profiles/macos/isolated.toml");
+#[cfg(not(target_os = "macos"))]
+pub const ISOLATED_PROFILE: &str = include_str!("../profiles/linux/isolated.toml");
 
 /// Baseline permissions before explicit grants, denies, and runtime capabilities.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -97,7 +103,9 @@ impl Default for Filesystem {
 pub struct Environment {
     /// Omission inherits ordinary variables only when the final mode is open.
     pub inherit: Option<bool>,
-    /// Exact names or trailing-star prefixes to retain from the parent.
+    /// Preserve inherited proxy URLs with userinfo only when explicitly enabled.
+    pub keep_proxy_credentials: bool,
+    /// Whole-name globs with * and ? to retain from the parent.
     pub keep: Vec<String>,
     /// Patterns removed after inheritance and assignments, before normalization.
     pub drop: Vec<String>,
@@ -106,13 +114,32 @@ pub struct Environment {
 }
 
 /// Opt-in capabilities beyond the filesystem and network baseline.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Runtime {
     /// An explicit capability bundle, required for ordinary closed-mode tools.
     pub basic: bool,
-    /// Give children a private, persistent per-user temporary directory.
+    /// Enable TMPDIR/TMP/TEMP and the corresponding filesystem grant.
     pub temporary_directory: bool,
+    /// "auto", "private", "system", or an explicit expandable directory path.
+    pub temp_dir: String,
+    /// Permit desktop/service Unix IPC independently of TCP/UDP networking.
+    pub service_ipc: bool,
+    /// Permit macOS security/keychain services; disabling can break native TLS.
+    pub keychain: bool,
+}
+
+impl Default for Runtime {
+    /// Preserve custom-profile IPC behavior; scratch is disabled unless requested.
+    fn default() -> Self {
+        Self {
+            basic: false,
+            temporary_directory: false,
+            temp_dir: "auto".into(),
+            service_ipc: true,
+            keychain: true,
+        }
+    }
 }
 
 /// Validate one source, then retain only its explicit TOML fields for merging.
@@ -171,6 +198,14 @@ pub struct LoadedProfile {
     pub chain: Vec<String>,
     /// Validated source documents, retained for exact field/item provenance.
     pub documents: Vec<SourceDocument>,
+    /// Opened source identities retained until launch completes or exec replaces us.
+    pub identities: Vec<crate::trust::Source>,
+    /// Permission relaxation applies only to explicitly opted-in shared profiles.
+    pub allow_shared: bool,
+    /// Configuration root, including when every selected source is embedded.
+    pub directory: PathBuf,
+    /// Absence used for automatic selection must remain true until exec.
+    pub absent_local: Option<PathBuf>,
 }
 
 /// One validated input before defaults or inheritance are applied.
@@ -188,12 +223,51 @@ impl LoadedProfile {
     /// Resolve permissions and deny every source file, including symlink targets.
     pub fn policy(&self, paths: &crate::policy::ContextPaths) -> Result<crate::policy::Policy> {
         let mut policy = crate::policy::Policy::resolve(&self.profile, paths)?;
+        self.revalidate()?;
+        for identity in &self.identities {
+            policy
+                .deny
+                .extend(crate::policy::path_aliases(&identity.target)?);
+        }
         for source in &self.sources {
             policy.deny.extend(crate::policy::path_aliases(source)?);
         }
         #[cfg(target_os = "linux")]
         policy.ignore_missing_denies()?;
         Ok(policy)
+    }
+
+    /// Detect replaced, edited, or newly-created source files before launch.
+    pub fn revalidate(&self) -> Result<()> {
+        crate::trust::directory(&self.directory, self.allow_shared)?;
+        if let Some(path) = &self.absent_local {
+            if fs::symlink_metadata(path).is_ok() {
+                bail!("local profile appeared after selection: {}", path.display());
+            }
+        }
+        for identity in &self.identities {
+            identity.revalidate()?;
+        }
+        for (path, document) in self.sources.iter().zip(&self.documents) {
+            if document.embedded && fs::symlink_metadata(path).is_ok() {
+                bail!(
+                    "profile appeared after embedded fallback was loaded: {}",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Show the selected on-disk source or the platform-specific embedded fallback.
+    pub fn selection(&self) -> String {
+        let path = self.sources.last().unwrap();
+        let embedded = self.documents.last().unwrap().embedded;
+        format!(
+            "{}{}",
+            path.display(),
+            if embedded { " (embedded fallback)" } else { "" }
+        )
     }
 
     /// Identify the last scalar override or the first introduction of a list item.
@@ -236,102 +310,149 @@ pub fn load(directory: &Path, name: &str) -> Result<Profile> {
     Ok(load_resolved(directory, name)?.profile)
 }
 
-/// Resolve the inheritance chain and apply defaults only after the final merge.
+/// Resolve a named profile with secure ownership and mode checks.
 pub fn load_resolved(directory: &Path, name: &str) -> Result<LoadedProfile> {
-    let mut sources = Vec::new();
-    let mut chain = Vec::new();
-    let mut documents = Vec::new();
-    let value = resolve(
+    load_selected(directory, None, Some(name), false)
+}
+
+/// Select an explicit global name, otherwise CWD/.lilbox/profile.toml when present.
+/// A local profile's parents are always named profiles in the global config root.
+pub fn load_selected(
+    directory: &Path,
+    cwd: Option<&Path>,
+    name: Option<&str>,
+    allow_shared: bool,
+) -> Result<LoadedProfile> {
+    crate::trust::directory(directory, allow_shared)?;
+    let local = cwd.map(|p| p.join(".lilbox/profile.toml"));
+    let selected = if name.is_none() {
+        match local.clone() {
+            Some(path) => match fs::symlink_metadata(&path) {
+                Ok(_) => Some(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error).context("cannot inspect local profile"),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    let absent_local = if name.is_none() && selected.is_none() {
+        local
+    } else {
+        None
+    };
+    let mut resolver = Resolver {
         directory,
-        name,
-        &mut Vec::new(),
-        &mut sources,
-        &mut chain,
-        &mut documents,
-    )?;
+        allow_shared,
+        visiting: Vec::new(),
+        sources: Vec::new(),
+        chain: Vec::new(),
+        documents: Vec::new(),
+        identities: Vec::new(),
+    };
+    let value = if let Some(path) = selected {
+        resolver.resolve("local", path, false)?
+    } else {
+        let name = name.unwrap_or("default");
+        validate_name(name)?;
+        resolver.resolve(name, directory.join(format!("{name}.toml")), true)?
+    };
     Ok(LoadedProfile {
         profile: value.try_into()?,
-        sources,
-        chain,
-        documents,
+        sources: resolver.sources,
+        chain: resolver.chain,
+        documents: resolver.documents,
+        identities: resolver.identities,
+        allow_shared,
+        directory: directory.into(),
+        absent_local,
     })
 }
 
-/// Recursively merge parents while recording sources and bounding recursion.
-fn resolve(
-    directory: &Path,
-    name: &str,
-    visiting: &mut Vec<(String, PathBuf)>,
-    sources: &mut Vec<PathBuf>,
-    chain: &mut Vec<String>,
-    documents: &mut Vec<SourceDocument>,
-) -> Result<toml::Value> {
-    validate_name(name)?;
-    let path = directory.join(format!("{name}.toml"));
-    // Different profile names can point at the same file through symlinks.
-    // Check both names and file identities to catch either kind of cycle.
-    let identity = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    if visiting.iter().any(|(n, p)| n == name || p == &identity) {
-        let mut names: Vec<_> = visiting.iter().map(|(n, _)| n.as_str()).collect();
-        names.push(name);
-        bail!(
-            "inheritance cycle: {} (repeated profile or file target)",
-            names.join(" -> ")
-        );
-    }
-    if visiting.len() >= 64 {
-        bail!("inheritance exceeds 64 profiles at {name}");
-    }
-    let mut embedded = false;
-    let source = match fs::read_to_string(&path) {
-        Ok(source) => source,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && matches!(name, "default" | "permissive") =>
-        {
-            // A dangling symlink is an invalid configuration, not a missing one.
-            if fs::symlink_metadata(&path).is_ok() {
-                bail!("cannot read profile {}: {error}", path.display());
-            }
-            embedded = true;
-            if name == "default" {
-                DEFAULT_PROFILE
-            } else {
-                PERMISSIVE_PROFILE
-            }
-            .to_owned()
+/// Mutable state for bounded inheritance resolution, with descriptor-backed sources.
+struct Resolver<'a> {
+    directory: &'a Path,
+    allow_shared: bool,
+    visiting: Vec<PathBuf>,
+    sources: Vec<PathBuf>,
+    chain: Vec<String>,
+    documents: Vec<SourceDocument>,
+    identities: Vec<crate::trust::Source>,
+}
+
+impl Resolver<'_> {
+    /// Read once and merge parents first. Only genuinely absent shipped names fall back.
+    fn resolve(&mut self, name: &str, path: PathBuf, fallback: bool) -> Result<toml::Value> {
+        if self.visiting.len() >= 64 {
+            bail!("inheritance exceeds 64 profiles at {name}");
         }
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot read profile {}", path.display()));
+        let (source, embedded, identity) =
+            match crate::trust::Source::read(&path, self.allow_shared) {
+                Ok((identity, source)) => {
+                    let target = identity.target.clone();
+                    self.identities.push(identity);
+                    (source, false, target)
+                }
+                Err(error)
+                    if fallback
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                        && fs::symlink_metadata(&path).is_err()
+                        && matches!(name, "default" | "permissive" | "isolated") =>
+                {
+                    let source = match name {
+                        "default" => DEFAULT_PROFILE,
+                        "permissive" => PERMISSIVE_PROFILE,
+                        _ => ISOLATED_PROFILE,
+                    };
+                    (source.to_owned(), true, path.clone())
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("cannot read profile {}", path.display()));
+                }
+            };
+        if self.visiting.contains(&identity) {
+            let mut names: Vec<_> = self
+                .visiting
+                .iter()
+                .map(|p| {
+                    p.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.push(name.into());
+            bail!(
+                "inheritance cycle: {} (repeated profile or file target)",
+                names.join(" -> ")
+            );
         }
-    };
-    let mut child = document(&source).with_context(|| format!("profile {}", path.display()))?;
-    let fields = child.clone();
-    let parent = child.as_table_mut().unwrap().remove("extends");
-    visiting.push((name.to_owned(), identity));
-    let merged = if let Some(parent) = parent {
-        let parent = parent.as_str().unwrap(); // validated by document
-        let mut base = resolve(directory, parent, visiting, sources, chain, documents)
-            .with_context(|| format!("profile {name} extends {parent}"))?;
+        let mut child = document(&source).with_context(|| format!("profile {}", path.display()))?;
+        let fields = child.clone();
+        let parent = child.as_table_mut().unwrap().remove("extends");
+        self.visiting.push(identity);
+        let mut base = if let Some(parent) = parent {
+            let parent = parent.as_str().unwrap();
+            self.resolve(parent, self.directory.join(format!("{parent}.toml")), true)
+                .with_context(|| format!("profile {name} extends {parent}"))?
+        } else {
+            toml::Value::Table(Default::default())
+        };
         merge(&mut base, child);
-        base
-    } else {
-        // Also deduplicate lists in a root document.
-        let mut base = toml::Value::Table(Default::default());
-        merge(&mut base, child);
-        base
-    };
-    // Record after recursion so diagnostics and dependency protection see the
-    // same base-to-child order used by the merge.
-    visiting.pop();
-    documents.push(SourceDocument {
-        name: name.into(),
-        embedded,
-        fields,
-    });
-    sources.push(path);
-    chain.push(name.to_owned());
-    Ok(merged)
+        self.visiting.pop();
+        self.documents.push(SourceDocument {
+            name: name.into(),
+            embedded,
+            fields,
+        });
+        self.sources.push(path);
+        self.chain.push(name.into());
+        Ok(base)
+    }
 }
 
 /// Merge tables by key, append unique list entries, and replace scalar values.
@@ -383,6 +504,19 @@ pub fn init(directory: &Path) -> Result<Vec<String>> {
 /// Write embedded defaults atomically under the caller's explicit overwrite choice.
 /// Versioned alternatives are deliberately not active profiles until reviewed/renamed.
 pub fn init_with_mode(directory: &Path, mode: InitMode) -> Result<Vec<String>> {
+    init_files(directory, mode, &[])
+}
+
+/// Initialize only selected shipped files, supporting independent installer decisions.
+pub fn init_files(directory: &Path, mode: InitMode, selected: &[String]) -> Result<Vec<String>> {
+    for name in selected {
+        if !matches!(
+            name.as_str(),
+            "default.toml" | "permissive.toml" | "isolated.toml" | "AGENTS.md"
+        ) {
+            bail!("not a shipped profile/guide filename: {name}");
+        }
+    }
     fs::create_dir_all(directory).context("cannot create profile directory")?;
     let mut created = Vec::new();
     for (name, contents) in [
@@ -391,6 +525,9 @@ pub fn init_with_mode(directory: &Path, mode: InitMode) -> Result<Vec<String>> {
         ("isolated.toml", ISOLATED_PROFILE),
         ("AGENTS.md", AGENT_GUIDE),
     ] {
+        if !selected.is_empty() && !selected.iter().any(|item| item == name) {
+            continue;
+        }
         let mut path = directory.join(name);
         let exists = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
@@ -451,7 +588,7 @@ mod tests {
     #[test]
     fn selection_and_no_clobber() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(load(root.path(), "default").unwrap().mode, Mode::Open);
+        assert_eq!(load(root.path(), "default").unwrap().mode, Mode::Closed);
         assert!(load(root.path(), "missing").is_err());
         for name in ["../secret", "/etc/passwd", ".", "a.b", ""] {
             assert!(load(root.path(), name).is_err());
@@ -542,7 +679,7 @@ mod inheritance_tests {
         );
         let p = load(root.path(), "child").unwrap();
         assert_eq!(p.network, Some(Network::Allow));
-        assert_eq!(p.environment.inherit, Some(true));
+        assert_eq!(p.environment.inherit, Some(false));
         assert!(p.runtime.temporary_directory);
         put(root.path(), "default", "version=1\nnetwork='deny'");
         assert_eq!(

@@ -16,8 +16,8 @@ Source links in these documents refer to the repository checkout.
 
 - Make `lilbox codex`, `lilbox claude`, `lilbox shell`, and
   `lilbox exec <program> [args...]` straightforward to use.
-- Provide a permissive default that protects selected credential/private paths,
-  while keeping ordinary networking, TLS, and proxy settings usable.
+- Provide a closed coding default with explicit workspace/tool/state grants,
+  usable networking/TLS, and filtered proxy settings. Keep permissive opt-in.
 - Offer a closed mode whose filesystem and runtime grants are explicit.
 - Preserve command arguments, terminal behavior, signals, and exit status.
 - Separate portable policy from OS enforcement so more backends can be added.
@@ -36,6 +36,7 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking, atomic initialization. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
 | [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
+| [src/discovery.rs](../src/discovery.rs) | Optional bounded filename-only project-secret inventory. |
 | [src/display.rs](../src/display.rs) | Terminal-safe colors, abbreviated notices, and native policy indentation. |
 | [src/inspect.rs](../src/inspect.rs) | Effective profile display with origins and static capability queries. |
 | [src/environment.rs](../src/environment.rs) | Child environment filtering, normalization, shell startup flags. |
@@ -44,6 +45,8 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/backend/bubblewrap.rs](../src/backend/bubblewrap.rs) | Linux mount planning, validation, read-only diagnostics, and bubblewrap command construction. |
 | [src/backend/bubblewrap/seccomp.rs](../src/backend/bubblewrap/seccomp.rs) | Native-ABI syscall filtering for Linux x86_64/aarch64. |
 | [src/backend/runtime.sb](../src/backend/runtime.sb) | Explicit basic runtime capability bundle for closed profiles. |
+| [src/trust.rs](../src/trust.rs) | Descriptor-backed profile identity, owner/mode checks, and pre-exec revalidation. |
+| [src/temporary.rs](../src/temporary.rs) | Read-only scratch selection and per-launch allocation. |
 | [src/launch.rs](../src/launch.rs) | Scratch directory validation, process hardening, Unix process replacement. |
 | [profiles/](../profiles/) | Embedded permissive/default/isolated profiles; the agent guide is embedded from docs/. |
 
@@ -83,7 +86,10 @@ flowchart TD
    `--overwrite-profiles` atomically replaces regular shipped files. `check` (also `profile check`)
    analyzes configurations and exits without executing a sandbox or creating
    scratch storage. Neither command requires an OS execution backend.
-4. Normal launches load the selected profile, resolve paths, protect the config
+4. Explicit `-p` selects a global profile; otherwise CWD/.lilbox/profile.toml
+   takes precedence over default. No ancestor-directory search occurs. Local
+   parents resolve globally. Load and validate the selected profile, resolve
+   paths, protect the config
    directory and every inherited profile file, and build the child environment.
 5. Backend selection succeeds on macOS and Linux. `policy` prints
    resolved native rules without launching a command or creating scratch storage.
@@ -95,7 +101,7 @@ flowchart TD
 6. A launch selects the command, prepares scratch storage if requested, prints and
    flushes a startup summary to stderr, and invokes the backend command with the
    sanitized environment. The summary shows the embedded version, selected profile
-   name, and actual command including shell startup flags. Complex arguments are
+   name and source path (or embedded fallback), and actual command including shell startup flags. Complex arguments are
    quoted and terminal controls/non-UTF-8 bytes escaped for display only. Color
    requires a stderr terminal, no `NO_COLOR`, and a TERM other than `dumb`.
    Launches also print the customization guide path. Inspection and configuration
@@ -122,15 +128,19 @@ The schema requires `version = 1`. Unknown fields in every configuration table,
 unknown enum values, and unsupported versions are errors. Profile names contain
 1–64 ASCII letters, digits, underscores, or hyphens; path traversal is rejected.
 
-`default` and `permissive` fall back to their embedded TOML only when absent.
-The shipped default inherits permissive; old standalone default files remain
-valid. Malformed files and dangling profile symlinks fail. Other names, including
-isolated, require files. Ordinary `init` uses temporary files and
-`persist_noclobber` to create three profiles and the embedded agent guide without
-replacing existing files or symlinks. Versioned initialization uses the same
-no-clobber operation for `NAME.toml.VERSION`/`AGENTS.md.VERSION` alternatives.
-Explicit overwrite refuses non-regular destinations and uses atomic persist for
-regular files. Custom named profiles are never part of this write set.
+`default`, `isolated`, and `permissive` have embedded fallbacks only when genuinely
+absent. Default extends isolated. The binary embeds native files from
+`profiles/macos/` or `profiles/linux/`; permissive is shared. Invalid files,
+dangling symlinks, unsafe permissions, and unreadable sources fail.
+
+Initialization uses atomic temporary-file persistence:
+
+- Preserve: `persist_noclobber` writes missing profiles/guide only.
+- Versioned: write inactive `NAME.toml.VERSION`/`AGENTS.md.VERSION` alternatives.
+- Overwrite: replace regular shipped files; reject symlinks/special files.
+- `init --file NAME`: restrict the operation to selected shipped filenames.
+
+Custom named profiles are never part of initialization's write set.
 
 Updating the executable changes embedded defaults and shared enforcement rules.
 Existing active TOML is replaced only with explicit init/installer authorization.
@@ -151,11 +161,11 @@ TOML value without schema defaults for merging. This avoids mistaking an omitted
 for an explicit `false`, or injecting mode-dependent defaults before the final
 mode is known. `version = 1` is mandatory in each file.
 
-A depth-first resolver tracks active names and canonical file targets. Repeated
+A depth-first resolver tracks descriptor-derived file targets. Repeated
 names/targets are dependency cycles; error contexts show the chain. A 64-profile
 limit bounds recursion, including hard-link or otherwise unusual aliases. Invalid
 parent names cannot escape the configuration directory through path traversal.
-Symlinked files are intentionally supported. Only genuinely absent `default`/`permissive` files
+Symlinked files are intentionally supported. Only genuinely absent shipped profile files
 use their embedded fallbacks, including when it is a parent.
 
 Merge tables recursively, append arrays with stable exact-value deduplication,
@@ -174,10 +184,33 @@ directory. On Linux, missing denies are removed after all source protection has
 been added; the ignored canonical paths are retained for notices and inspection.
 Environment validation is shared between `environment::build` and the checker.
 
+### Profile trust and source identity
+
+`trust::Source` opens each source once with close-on-exec/nonblocking flags and
+requires a regular file. It records fstat owner/mode/device/inode, size, and
+modification/change timestamps. The protected path comes from macOS `F_GETPATH`
+or Linux `/proc/self/fd`, not a second source-path canonicalization.
+
+- Check lexical and target ancestors for trusted ownership and writable modes.
+- Allow root-owned sticky ancestors, but not a shared-writable policy directory.
+- Retain source descriptors until exec; compare descriptor/path/target identities
+  after reading, during policy resolution, and immediately before exec.
+- Reject newly appeared files after embedded fallback selection.
+- `--allow-shared-profiles` bypasses owner/mode checks only, not identity checks.
+
+This reduces accidental shared-policy exposure and detectable replacement races.
+It does not make content from an unfamiliar repository trustworthy or defeat a
+malicious same-UID process. General filesystem TOCTOU/hard-link limits remain.
+
 ### Static configuration analysis
 
-`check::analyze` discovers local `*.toml` files in sorted order and always includes
-`default` and `permissive`, or accepts the explicit `-p` selection. Each selected profile is resolved
+`check --secrets` optionally walks CWD for secret-looking filenames. It does not
+read contents or modify policy. Generated directories and symlink directories are
+excluded explicitly; entry/depth limits and I/O errors mark an incomplete scan.
+
+
+`check::analyze` discovers global `*.toml` files in sorted order and includes all
+three embedded starters plus CWD/.lilbox/profile.toml, or accepts explicit `-p`. Each selected profile is resolved
 independently; an invalid profile does not prevent checking the others. Invalid
 filenames, unreadable files, missing dependencies, schema errors, and cycles become
 errors. An unresolvable dependency prevents effective-policy checks for that chain.
@@ -189,7 +222,8 @@ The analyzer compares resolved path aliases with explicit/built-in/configuration
 denies. Grants fully shadowed by a deny produce warnings; broader grants with denied
 children produce informational exclusions, because those are common intentional
 policies. Environment pattern intersections are compared case-insensitively with
-the same exact/trailing-star semantics used at launch. It reports ineffective
+the same whole-name `*`/`?` glob semantics used at launch. A bounded product-state
+search detects pattern intersection, including suffix/prefix overlap. It reports ineffective
 keeps, dropped assignments, reserved launch variables, suspicious closed-runtime
 combinations, broad root/system grants, inaccessible CWD/scratch, and unsafe existing
 scratch storage. Intentional child scalar and assignment overrides are not errors.
@@ -272,20 +306,25 @@ to the writable data volume and must not become an accidental broad grant.
 
 `Network::Allow` emits `(allow network*)`; `Network::Deny` emits
 `(deny network*)`. There are no endpoint, port, DNS-name, or proxy constraints.
-The default permits ordinary HTTPS and WebSockets, and environment inheritance
-preserves proxy and CA-bundle settings.
+The default permits ordinary HTTPS and WebSockets; explicit environment keep
+globs preserve ordinary proxy/CA settings. Proxy userinfo requires an opt-in.
 
 macOS TLS clients may load public roots through SecurityServer/securityd.
 Blocking those services caused the system trust-domain query used by
 rustls-native-certs to fail and led to `UnknownIssuer` errors. Consequently:
 
-- Online open profiles leave native trust services available through their
-  permissive baseline.
+- Online open profiles with `runtime.keychain=true` leave native trust services
+  available through their permissive baseline.
 - Online closed profiles explicitly grant DNS, trustd, and securityd-related Mach
   lookups. Filesystem and runtime grants still determine which applications and
   additional CA bundles work.
 - Offline profiles with credential protection explicitly deny common credential
   service lookups. Closed mode also denies ungranted services by default.
+
+`runtime.service_ipc=false` independently denies named Unix socket operations and
+Mach lookups outside the directory/DNS/public-trust exceptions. Anonymous child IPC
+is not a service endpoint. `runtime.keychain=false` also denies security services,
+including when online; this explicit choice can break native TLS discovery.
 
 Private-keychain files remain on the filesystem deny list. Permitting the native
 services does permit service-mediated keychain operations subject to macOS's own
@@ -306,6 +345,11 @@ grant roots and visible deny ancestors are combined in one parent-first mount
 order so an ancestor bind cannot undo a child grant or rename pin. Runtime mounts
 replace `/proc`, `/dev`, and `/sys`; explicit paths inside those trees are rejected.
 Closed mode requires basic runtime and remounts the synthetic root read-only.
+
+Private Linux scratch is a mode-0700 tmpfs at `/tmp/lilbox`. Its path is excluded
+from host bind grants; the synthetic mount participates in parent-first ordering.
+Child grants remain visible, and no host scratch directory is created. This avoids
+exposing a host directory merely because it shares the private mount pathname.
 
 Existing denies are applied last as inaccessible read-only empty directories or
 files. Nested denies are collapsed. Missing denies are ignored at startup and do
@@ -337,14 +381,16 @@ summary. The launch still passes arguments directly, never through a shell.
 The launcher clears the inherited environment and installs only the constructed
 map. Processing is ordered:
 
-1. Validate `keep`/`drop` patterns and `set` assignments. Names use letters,
-   underscores, and non-leading digits; patterns optionally end in `*`.
+1. Validate `keep`/`drop` globs and `set` assignments. Globs allow ASCII names,
+   `*` anywhere, and `?`, with a 256-byte limit. Match the whole name; no regexes.
 2. Include inherited variables if explicitly kept, or if inheritance is enabled
    and their names are not sensitive. Discard non-UTF-8 names. Comparisons use
    ASCII uppercase, but retained names/values preserve their original spelling.
 3. Remove runtime injection variables unconditionally; `keep` cannot restore them,
    and attempting to `set` them is an error.
-4. Apply explicit `set` assignments, then case-insensitive `drop` patterns.
+4. Drop inherited proxy URLs with userinfo unless `keep_proxy_credentials=true`.
+   Apply explicit `set` assignments, case-insensitive drops, and disabled-service
+   environment restrictions. No proxy value is printed.
 5. Normalize mandatory launch context: HOME, PWD, PATH, and `LILBOX=1`. Drop
    relative/empty PATH entries, exact CWD entries, and entries containing `..`.
    A missing PATH gets `/usr/bin:/bin:/usr/sbin:/sbin`; a supplied PATH that becomes
@@ -371,14 +417,21 @@ The wrapper adds no agent-specific bypass flags or nested-sandbox adjustments.
 
 ## Process lifecycle and scratch storage
 
-Before entering the sandbox, the launcher creates `~/.cache/lilbox/tmp` when
-requested. New directories request mode 0700. An existing final path must be a
-directory, not a symlink, owned by the effective user, without group/other
-permission bits. Existing permissions are validated rather than silently changed.
+`temporary::select` computes scratch semantics without side effects. Launch then
+prepares storage and rebuilds policy/environment with the final path:
 
-Scratch storage is persistent and shared across profiles and invocations for the
-same home directory. There is no per-run cleanup supervisor. Explicit denies can
-still prevent access to this directory despite the scratch grant.
+| Selection | Behavior |
+| --- | --- |
+| `auto` | Existing `.lilbox/` selects `.lilbox/tmp`; otherwise private. |
+| `private` on Linux | Namespace-owned tmpfs; lifetime follows sandbox processes. |
+| `private` on macOS | Fresh mode-0700 `~/.cache/lilbox/private/run-*`; no supervisor. |
+| `system` | Parent system temp; used by permissive. |
+| Explicit path | Reusable user-owned directory with no group/other permission bits. |
+
+macOS private directories persist after successful exec. Setup errors remove the
+new directory through its temporary owner. Project/explicit directories intentionally
+persist and may be shared. Existing permissions are validated, never repaired
+silently. See [retention and limits](profiles.md#temporary-storage).
 
 The single-threaded launcher enumerates `/dev/fd` before its `pre_exec` hook. The
 hook performs only system calls: sets umask 077, sets both core-dump limits to zero,
@@ -451,9 +504,11 @@ The POSIX installer detects OS/architecture, resolves latest or a pinned stable
 version, verifies the downloaded checksum and embedded version, then atomically
 replaces the executable under the requested prefix. It invokes the installed
 binary's `init` command with the chosen overwrite/versioned mode and shared
-HOME/XDG resolution. Existing shipped profiles and AGENTS.md trigger one prompt
+HOME/XDG resolution. Each existing shipped profile and AGENTS.md gets its own prompt
 through `/dev/tty` (stdin may carry the script). Declining or no usable terminal
-selects versioned alternatives; `--overwrite-profiles` bypasses the prompt. Initialization errors report a partial installation
+selects a versioned alternative for that file; `--overwrite-profiles` bypasses prompts.
+The installer detects `init --file` support; older binaries retain their compatible
+preserve/versioned behavior without a misleading per-file prompt. Initialization errors report a partial installation
 and a retry command. Progress messages show download, verification, copy, and
 initialization stages; successful installs show terminal-aware color, a box logo,
 config/executable locations, and usage/PATH guidance. It does not install sandbox
@@ -469,7 +524,9 @@ and verifies a GCS readback. The public URL is
 `gs://muthanna.com/lilbox/install.sh`. Binary and checksum downloads remain on
 GitHub Releases. CI tests this uploader with a stubbed gcloud, without publishing.
 
-CI runs portable checks, enforcement, and packaging on Linux and macOS. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
+CI runs portable checks, enforcement, packaging, and an online OSV lockfile gate
+on Linux/macOS workflows. The same gate blocks release publication. Dependabot
+configuration schedules Cargo and GitHub Actions updates. The complete contributor commands are in [AGENTS.md](../AGENTS.md).
 
 The separate `www/` landing page is static HTML with embedded CSS/JavaScript and
 one generated image. `just upload` runs `scripts/upload.sh`, which validates and

@@ -63,21 +63,41 @@ impl Mounts {
                 deny.insert(path);
             }
         }
+        let mut write = canonical(&policy.write)?;
+        if let Some(path) = &policy.temporary_tmpfs {
+            write.remove(&canonicalize_future(path)?);
+        }
         Ok(Self {
             read: canonical(&policy.read)?,
-            write: canonical(&policy.write)?,
+            write,
             deny,
+        })
+    }
+
+    /// A mount over a parent grant hides that host subtree. Only explicit grants
+    /// below the private tmpfs can reintroduce host data, including ancestor pins.
+    fn host_covered(&self, policy: &Policy, path: &Path, grants: &BTreeSet<PathBuf>) -> bool {
+        grants.iter().any(|grant| {
+            path.starts_with(grant)
+                && !policy.temporary_tmpfs.as_ref().is_some_and(|root| {
+                    path.starts_with(root) && (grant == root || !grant.starts_with(root))
+                })
         })
     }
 
     /// Check baseline/grant write access; callers apply denies and ancestor pins.
     fn writable(&self, policy: &Policy, path: &Path) -> bool {
-        policy.mode == Mode::Open || covered(path, &self.write)
+        (policy.mode == Mode::Open
+            && !policy
+                .temporary_tmpfs
+                .as_ref()
+                .is_some_and(|root| path.starts_with(root)))
+            || self.host_covered(policy, path, &self.write)
     }
 
     /// Check baseline/grant visibility before masking excluded subtrees.
     fn visible(&self, policy: &Policy, path: &Path) -> bool {
-        self.writable(policy, path) || covered(path, &self.read)
+        self.writable(policy, path) || self.host_covered(policy, path, &self.read)
     }
 }
 
@@ -95,10 +115,15 @@ fn arguments(
     mut empty_fd: impl FnMut() -> Result<String>,
     seccomp_fd: &str,
 ) -> Result<Vec<OsString>> {
-    seccomp::filter(policy.network)?; // Also reject unsupported syscall ABIs.
+    seccomp::filter(policy.network, policy.service_ipc)?; // Also reject unsupported syscall ABIs.
     if policy.mode == Mode::Closed && !policy.basic_runtime {
         bail!(
             "bubblewrap requires runtime.basic=true in closed mode; refusing to grant implicit execution"
+        );
+    }
+    if !policy.keychain {
+        bail!(
+            "runtime.keychain=false is macOS-only; Linux service IPC is controlled by runtime.service_ipc"
         );
     }
     let mounts = Mounts::new(policy)?;
@@ -165,11 +190,10 @@ fn arguments(
     }
     // Pins prevent ancestor renames. Only bind already-granted host trees;
     // binding a synthetic ancestor in closed mode would leak ungranted files.
-    let mut bindings: BTreeSet<_> = if policy.mode == Mode::Closed {
-        mounts.read.union(&mounts.write).cloned().collect()
-    } else {
-        BTreeSet::new()
-    };
+    let mut bindings: BTreeSet<_> = mounts.read.union(&mounts.write).cloned().collect();
+    if let Some(path) = &policy.temporary_tmpfs {
+        bindings.insert(path.clone());
+    }
     for deny in &mounts.deny {
         bindings.extend(
             deny.ancestors()
@@ -181,6 +205,15 @@ fn arguments(
     // Parent-first bindings prevent a later parent mount from undoing a child grant.
     for path in ordered(&bindings) {
         if covered(path, &mounts.deny) {
+            continue;
+        }
+        if policy.temporary_tmpfs.as_ref() == Some(path) {
+            args.extend([
+                "--perms".into(),
+                "700".into(),
+                "--tmpfs".into(),
+                path.into(),
+            ]);
             continue;
         }
         let writable = mounts.writable(policy, path);
@@ -206,7 +239,14 @@ fn arguments(
     // Denies are last, and descendants of a denied root need no further mounts.
     let mut masked = BTreeSet::new();
     for deny in ordered(&mounts.deny) {
-        if covered(deny, &masked) || !deny.try_exists()? || !mounts.visible(policy, deny) {
+        if covered(deny, &masked)
+            || !deny.try_exists()?
+            || !(mounts.visible(policy, deny)
+                || policy
+                    .temporary_tmpfs
+                    .as_ref()
+                    .is_some_and(|path| deny.starts_with(path)))
+        {
             continue;
         }
         if deny.is_dir() {
@@ -267,8 +307,9 @@ impl Backend for Bubblewrap {
     fn render(&self, policy: &Policy) -> Result<String> {
         let args = arguments(policy, || Ok("<empty-file-fd>".into()), "<seccomp-fd>")?;
         let mut output = format!(
-            "# bubblewrap arguments; fd placeholders are supplied by lilbox\n# seccomp: {}\n{}",
+            "# bubblewrap arguments; fd placeholders are supplied by lilbox\n# seccomp: {}; runtime.service_ipc={}\n{}",
             seccomp::description(policy.network),
+            policy.service_ipc,
             EXECUTABLE
         );
         for arg in args {
@@ -290,7 +331,10 @@ impl Backend for Bubblewrap {
         if !Path::new(EXECUTABLE).is_file() {
             bail!("/usr/bin/bwrap is unavailable; install bubblewrap; refusing to run unsandboxed");
         }
-        let filter = memory_file(c"lilbox-seccomp", &seccomp::filter(policy.network)?)?;
+        let filter = memory_file(
+            c"lilbox-seccomp",
+            &seccomp::filter(policy.network, policy.service_ipc)?,
+        )?;
         let filter_fd = filter.as_raw_fd().to_string();
         let mut files = vec![filter];
         let args = arguments(
@@ -306,5 +350,50 @@ impl Backend for Bubblewrap {
         let mut command = Command::new(EXECUTABLE);
         command.args(args);
         Ok(SandboxCommand { command, files })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config, policy::ContextPaths};
+
+    /// Deny ancestor pins must not restore host data hidden by a private tmpfs,
+    /// even when a broader workspace/root grant covers its mount location.
+    #[test]
+    fn private_tmpfs_hides_parent_grants_but_allows_explicit_children() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let scratch = root.join("scratch");
+        let hidden = scratch.join("hidden");
+        let exposed = scratch.join("exposed");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::create_dir(&exposed).unwrap();
+        fs::write(hidden.join("secret"), "fixture").unwrap();
+        let paths = ContextPaths {
+            home: root.join("home"),
+            cwd: root.clone(),
+            config: root.join("config"),
+            temporary: scratch.clone(),
+        };
+        for mode in ["closed", "open"] {
+            let profile = config::parse(&format!(
+                "version=1\nmode='{mode}'\n[filesystem]\nprotect_credentials=false\nallow_write=['${{CWD}}']\nallow_read=['scratch/exposed']\ndeny=['scratch/hidden/secret']\n[runtime]\nbasic=true\ntemporary_directory=true\ntemp_dir='private'"
+            )).unwrap();
+            let policy = Policy::resolve(&profile, &paths).unwrap();
+            let args = arguments(&policy, || Ok("10".into()), "11").unwrap();
+            let host_binds: BTreeSet<_> = args
+                .windows(3)
+                .filter(|args| args[0] == "--bind" || args[0] == "--ro-bind")
+                .map(|args| PathBuf::from(&args[1]))
+                .collect();
+            assert!(!host_binds.contains(&scratch));
+            assert!(!host_binds.contains(&hidden));
+            assert!(host_binds.contains(&exposed));
+            assert!(
+                args.windows(2)
+                    .any(|args| args[0] == "--tmpfs" && args[1] == scratch)
+            );
+        }
     }
 }

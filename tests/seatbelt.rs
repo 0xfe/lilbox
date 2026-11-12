@@ -328,7 +328,8 @@ fn unix_socket_connections_are_blocked_by_network_deny() {
         "1",
         socket.to_str().unwrap(),
     ];
-    succeeds(&f.run("default", &args));
+    succeeds(&f.run("permissive", &args));
+    assert!(!f.run("default", &args).status.success());
     assert!(!f.run("offline", &args).status.success());
     assert!(!f.run("isolated", &args).status.success());
 }
@@ -339,8 +340,8 @@ fn unix_socket_connections_are_blocked_by_network_deny() {
 fn named_agents_keep_their_arguments_and_non_utf8_arguments_survive() {
     use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
     let f = Fixture::new();
-    let bin = f.home.join("bin");
-    fs::create_dir(&bin).unwrap();
+    let bin = f.home.join(".local/bin");
+    fs::create_dir_all(&bin).unwrap();
     let agent = bin.join("codex");
     fs::write(&agent, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
     fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
@@ -534,3 +535,6 @@ fn inherited_profiles_enforce_merged_permissions_and_protect_all_sources() {
             .contains("extends='isolated'")
     );
 }
+
+#[path = "support/hardening.rs"]
+mod hardening;

@@ -6,7 +6,7 @@ network = "allow"
 
 [environment]
 # Appends to the parent's small keep list; general inheritance stays disabled.
-# Proxy URLs may contain credentials. Remove entries you do not need.
+# Proxy URLs with userinfo require environment.keep_proxy_credentials=true.
 keep = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "AWS_CA_BUNDLE"]
 # Custom CA bundles outside the inherited read grants need explicit allow_read.
 # Agents also need grants for their executable/runtime, state, and authentication.

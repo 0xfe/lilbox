@@ -119,7 +119,7 @@ fn denied(output: Output) {
 #[ignore = "requires Linux bubblewrap and user namespaces; run just test-sandbox"]
 fn open_denies_credentials_aliases_ancestor_renames_and_config() {
     let f = Fixture::new();
-    succeeds(f.run("default", &["/bin/sh", "-c", "cat allowed; echo new > created; echo changed > allowed; echo outside > \"$HOME/outside\""]));
+    succeeds(f.run("permissive", &["/bin/sh", "-c", "cat allowed; echo new > created; echo changed > allowed; echo outside > \"$HOME/outside\""]));
     assert_eq!(fs::read_to_string(f.work.join("created")).unwrap(), "new\n");
     symlink(f.home.join(".ssh"), f.work.join("alias")).unwrap();
     for path in [
@@ -129,16 +129,16 @@ fn open_denies_credentials_aliases_ancestor_renames_and_config() {
         f.work.join(".env.local"),
         f.config.join("isolated.toml"),
     ] {
-        denied(f.run("default", &["/bin/cat", path.to_str().unwrap()]));
+        denied(f.run("permissive", &["/bin/cat", path.to_str().unwrap()]));
     }
-    denied(f.run("default", &["/bin/sh", "-c", "echo bad > .env"]));
-    denied(f.run("default", &["/bin/sh", "-c", "chmod 700 \"$HOME/.ssh\""]));
+    denied(f.run("permissive", &["/bin/sh", "-c", "echo bad > .env"]));
+    denied(f.run("permissive", &["/bin/sh", "-c", "chmod 700 \"$HOME/.ssh\""]));
     denied(f.run(
-        "default",
+        "permissive",
         &["/bin/sh", "-c", "mv \"$HOME\" \"$HOME-moved\""],
     ));
     denied(f.run(
-        "default",
+        "permissive",
         &[
             "/bin/sh",
             "-c",
@@ -158,10 +158,8 @@ fn closed_grants_persist_writes_and_do_not_expose_ungranted_home() {
         fs::read_to_string(f.work.join("created")).unwrap(),
         "okay\n"
     );
-    assert_eq!(
-        fs::read_to_string(f.home.join(".cache/lilbox/tmp/probe")).unwrap(),
-        "scratch\n"
-    );
+    // Private tmpfs writes never create the old shared host scratch path.
+    assert!(!f.home.join(".cache/lilbox/tmp/probe").exists());
     denied(f.run(
         "isolated",
         &["/bin/cat", f.home.join("outside").to_str().unwrap()],
@@ -201,11 +199,11 @@ fn missing_denies_are_ignored_without_restricting_parent_entries() {
         .lines()
         .find(|l| l.contains("Ignored absent deny paths:"))
         .unwrap();
-    assert!(notice.contains("and 4 other files"), "{notice}");
-    for name in ["a", "b", "c"] {
+    assert!(notice.contains("and 5 other files"), "{notice}");
+    for name in [".lilbox/profile.toml", "a", "b"] {
         assert!(notice.contains(f.work.join(name).to_str().unwrap()));
     }
-    for name in ["d", "e", "f", "g"] {
+    for name in ["c", "d", "e", "f", "g"] {
         assert!(!notice.contains(f.work.join(name).to_str().unwrap()));
     }
     assert_eq!(succeeds(output), "accessible\n");
@@ -218,16 +216,16 @@ fn missing_denies_are_ignored_without_restricting_parent_entries() {
     // A missing credential deny outside CWD must not freeze its home parent either.
     fs::remove_file(f.work.join(".env")).unwrap();
     succeeds(f.run(
-        "default",
+        "permissive",
         &[
             "/bin/sh",
             "-c",
             "echo new > .env; mkdir \"$HOME/.aws\"; echo credential > \"$HOME/.aws/credentials\"",
         ],
     ));
-    denied(f.run("default", &["/bin/cat", ".env"]));
+    denied(f.run("permissive", &["/bin/cat", ".env"]));
     denied(f.run(
-        "default",
+        "permissive",
         &[
             "/bin/cat",
             f.home.join(".aws/credentials").to_str().unwrap(),
@@ -274,10 +272,17 @@ fn online_tcp_unix_and_public_ca_reads_offline_socket_denial() {
     );
     let unix_script = "import socket; s=socket.socket(socket.AF_UNIX); s.connect('service.sock')";
     for script in [tcp_script.as_str(), unix_script] {
-        succeeds(f.run("default", &["/usr/bin/python3", "-c", script]));
+        succeeds(f.run("permissive", &["/usr/bin/python3", "-c", script]));
         denied(f.run("offline", &["/usr/bin/python3", "-c", script]));
         denied(f.run("isolated", &["/usr/bin/python3", "-c", script]));
     }
+    succeeds(f.run("default", &["/usr/bin/python3", "-c", &tcp_script]));
+    denied(f.run("default", &["/usr/bin/python3", "-c", unix_script]));
+    f.profile(
+        "ipc",
+        "version=1\nextends='default'\n[runtime]\nservice_ipc=true",
+    );
+    succeeds(f.run("ipc", &["/usr/bin/python3", "-c", unix_script]));
     denied(f.run(
         "offline",
         &[
@@ -434,3 +439,6 @@ sys.exit(os.waitstatus_to_exitcode(status))
         }
     }
 }
+
+#[path = "support/hardening.rs"]
+mod hardening;

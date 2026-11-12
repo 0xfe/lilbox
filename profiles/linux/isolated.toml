@@ -1,0 +1,20 @@
+# Offline workspace confinement; platform system tools are read-only.
+version = 1
+mode = "closed"
+network = "deny"
+
+[filesystem]
+protect_credentials = true
+allow_read = ["/usr", "/bin", "/sbin", "/etc", "/etc/resolv.conf", "/lib", "/lib64"]
+allow_write = ["${CWD}"]
+deny = []
+
+[environment]
+inherit = false
+keep = ["TERM", "COLORTERM", "LANG", "LC_*", "TZ"]
+
+[runtime]
+basic = true
+temporary_directory = true
+temp_dir = "auto"
+service_ipc = false

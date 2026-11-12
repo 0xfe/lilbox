@@ -33,7 +33,8 @@ def verify(archive):
                     destination.chmod(member.mode & 0o777)
         package = root / name
         for entry in ('lilbox', 'README.md', 'LICENSE', 'CHANGELOG.md', 'install.sh',
-                      'profiles/default.toml', 'profiles/permissive.toml', 'profiles/isolated.toml', 'docs/LILBOX-AGENTS.md',
+                      'profiles/macos/default.toml', 'profiles/macos/isolated.toml',
+                      'profiles/linux/default.toml', 'profiles/linux/isolated.toml', 'profiles/permissive.toml', 'docs/LILBOX-AGENTS.md',
                       'examples/README.md', 'docs/design.md', 'docs/profiles.md',
                       'docs/development.md', 'docs/security.md'):
             assert (package / entry).is_file(), f'Missing {entry}'
