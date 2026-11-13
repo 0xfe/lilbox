@@ -538,3 +538,6 @@ fn inherited_profiles_enforce_merged_permissions_and_protect_all_sources() {
 
 #[path = "support/hardening.rs"]
 mod hardening;
+
+#[path = "fixtures/doctor.rs"]
+mod doctor;

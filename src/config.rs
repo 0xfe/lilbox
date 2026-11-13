@@ -1,4 +1,4 @@
-//! Strict profile parsing, inheritance/provenance, and atomic profile initialization.
+//! Strict profile parsing, inheritance/provenance, and source validation.
 //! Merge raw TOML before applying defaults so omitted child fields stay omitted.
 
 use anyhow::{Context, Result, bail};
@@ -6,7 +6,6 @@ use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -15,10 +14,8 @@ use std::{
 pub const DEFAULT_PROFILE: &str = include_str!("../profiles/macos/default.toml");
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_PROFILE: &str = include_str!("../profiles/linux/default.toml");
-/// Open baseline, also available without running init.
+/// Open baseline, also available without installed profiles.
 pub const PERMISSIVE_PROFILE: &str = include_str!("../profiles/permissive.toml");
-/// Instructions installed beside profiles for other coding agents.
-pub const AGENT_GUIDE: &str = include_str!("../docs/LILBOX-AGENTS.md");
 /// Closed starter and embedded inheritance fallback for the current platform.
 #[cfg(target_os = "macos")]
 pub const ISOLATED_PROFILE: &str = include_str!("../profiles/macos/isolated.toml");
@@ -204,6 +201,8 @@ pub struct LoadedProfile {
     pub allow_shared: bool,
     /// Configuration root, including when every selected source is embedded.
     pub directory: PathBuf,
+    /// Explain the CLI/local/global precedence decision.
+    pub selection_reason: String,
     /// Absence used for automatic selection must remain true until exec.
     pub absent_local: Option<PathBuf>,
 }
@@ -337,6 +336,16 @@ pub fn load_selected(
     } else {
         None
     };
+    let selection_reason = if let Some(name) = name {
+        format!(
+            "explicit -p {name} selects a global profile; CWD/.lilbox/profile.toml is not considered"
+        )
+    } else if selected.is_some() {
+        "no -p supplied; CWD/.lilbox/profile.toml takes precedence over global default".into()
+    } else {
+        "no -p supplied and no CWD/.lilbox/profile.toml; using global default (embedded if absent)"
+            .into()
+    };
     let absent_local = if name.is_none() && selected.is_none() {
         local
     } else {
@@ -367,6 +376,7 @@ pub fn load_selected(
         allow_shared,
         directory: directory.into(),
         absent_local,
+        selection_reason,
     })
 }
 
@@ -410,8 +420,18 @@ impl Resolver<'_> {
                     (source.to_owned(), true, path.clone())
                 }
                 Err(error) => {
+                    let hint = if fallback
+                        && error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                        && fs::symlink_metadata(&path).is_err()
+                    {
+                        crate::profiles::suggestion(self.directory, name)
+                    } else {
+                        String::new()
+                    };
                     return Err(error)
-                        .with_context(|| format!("cannot read profile {}", path.display()));
+                        .with_context(|| format!("cannot read profile {}{hint}", path.display()));
                 }
             };
         if self.visiting.contains(&identity) {
@@ -485,85 +505,6 @@ fn merge(base: &mut toml::Value, child: toml::Value) {
     }
 }
 
-/// How init handles existing shipped files; ordinary init always preserves them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InitMode {
-    /// Leave every existing entry, including symlinks, unchanged.
-    Preserve,
-    /// Write version-suffixed alternatives without replacing existing alternatives.
-    Versioned,
-    /// Atomically replace regular files; refuse symlinks and non-file entries.
-    Overwrite,
-}
-
-/// Install the three starter profiles and agent guide without replacing user files.
-pub fn init(directory: &Path) -> Result<Vec<String>> {
-    init_with_mode(directory, InitMode::Preserve)
-}
-
-/// Write embedded defaults atomically under the caller's explicit overwrite choice.
-/// Versioned alternatives are deliberately not active profiles until reviewed/renamed.
-pub fn init_with_mode(directory: &Path, mode: InitMode) -> Result<Vec<String>> {
-    init_files(directory, mode, &[])
-}
-
-/// Initialize only selected shipped files, supporting independent installer decisions.
-pub fn init_files(directory: &Path, mode: InitMode, selected: &[String]) -> Result<Vec<String>> {
-    for name in selected {
-        if !matches!(
-            name.as_str(),
-            "default.toml" | "permissive.toml" | "isolated.toml" | "AGENTS.md"
-        ) {
-            bail!("not a shipped profile/guide filename: {name}");
-        }
-    }
-    fs::create_dir_all(directory).context("cannot create profile directory")?;
-    let mut created = Vec::new();
-    for (name, contents) in [
-        ("permissive.toml", PERMISSIVE_PROFILE),
-        ("default.toml", DEFAULT_PROFILE),
-        ("isolated.toml", ISOLATED_PROFILE),
-        ("AGENTS.md", AGENT_GUIDE),
-    ] {
-        if !selected.is_empty() && !selected.iter().any(|item| item == name) {
-            continue;
-        }
-        let mut path = directory.join(name);
-        let exists = match fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                if mode == InitMode::Overwrite && !metadata.file_type().is_file() {
-                    bail!("refusing to overwrite non-regular file {}", path.display());
-                }
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error).context("cannot inspect existing profile"),
-        };
-        if exists {
-            match mode {
-                InitMode::Preserve => continue,
-                InitMode::Versioned => {
-                    path = directory.join(format!("{name}.{}", env!("CARGO_PKG_VERSION")))
-                }
-                InitMode::Overwrite => {}
-            }
-        }
-        let mut file = tempfile::NamedTempFile::new_in(directory)?;
-        file.write_all(contents.as_bytes())?;
-        let result = if mode == InitMode::Overwrite {
-            file.persist(&path)
-        } else {
-            file.persist_noclobber(&path)
-        };
-        match result {
-            Ok(_) => created.push(path.display().to_string()),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.error).context("cannot write profile or agent guide"),
-        }
-    }
-    Ok(created)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,18 +525,16 @@ mod tests {
         parse(ISOLATED_PROFILE).unwrap();
     }
 
-    /// Built-in fallbacks require absence, and ordinary init preserves existing user files.
+    /// Built-in fallbacks require absence; invalid installed files must fail.
     #[test]
-    fn selection_and_no_clobber() {
+    fn selection_and_invalid_files() {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(load(root.path(), "default").unwrap().mode, Mode::Closed);
         assert!(load(root.path(), "missing").is_err());
         for name in ["../secret", "/etc/passwd", ".", "a.b", ""] {
             assert!(load(root.path(), name).is_err());
         }
-        assert_eq!(init(root.path()).unwrap().len(), 4);
         fs::write(root.path().join("default.toml"), "custom").unwrap();
-        assert!(init(root.path()).unwrap().is_empty());
         assert_eq!(
             fs::read_to_string(root.path().join("default.toml")).unwrap(),
             "custom"

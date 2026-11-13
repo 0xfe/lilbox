@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.4 — 2026-11-12
+
+- Remove repetitive footer explanations from permission queries and doctor output.
+- Refresh the website with a combined configuration/run guide, copyable agent
+  prompt and command, clearer typography, and an outer-sandbox explanation.
+- Restructure the development guide with task-focused sections, command examples,
+  tables, and concise testing, release, installer, and deployment instructions.
+
+## 0.4.3 — 2026-11-12
+
+- Keep the coding-agent guide prompt in help only; ordinary launches print only
+  their version, selected profile, and command.
+- Add `profile list`, conservative profile-name suggestions, and local/global
+  selection explanations in profile inspection and diagnostics.
+- Add `doctor` with actual bounded sandbox startup, executable discovery,
+  configuration trust checks, and failure-specific remedies.
+- Explain blocked environment variables with matching filters, inherited drop
+  sources, and exact-name profile repairs without exposing secret values.
+- Add `init --project --extends NAME` to create a private local profile with
+  atomic overwrite protection. Global profiles remain installer-managed.
+- Document the commands and add portable and native host regression coverage.
+
+## 0.4.2 — 2026-11-12
+
+- Move profile installation into the installer. It copies the native profiles and
+  agent guide directly from the checksum-verified archive; the CLI no longer
+  provides a configuration-writing command.
+- Preserve individual overwrite prompts, versioned alternatives, private file
+  permissions, symlink protections, and support for older archive layouts.
+- Simplify the completion screen to the installation paths, PATH reminder, and
+  one coding-agent prompt. Remove the repeated guide messages.
+- Update documentation and verify the packaged installer with offline downloads
+  before running sandbox smoke tests.
+
+## 0.4.1 — 2026-11-12
+
+- Select `.lilbox/profile.toml` automatically from the working directory, unless
+  overridden with `-p`. Show the selected profile path at startup and inspection.
+- Support whole-name environment globs with `*` and `?`, including `*_API_KEY`.
+- Ship separate macOS/Linux defaults extending `isolated`, with explicit coding
+  tool, workspace, cache, agent-state, and network permissions. Existing installed
+  profiles retain their settings until explicitly replaced.
+- Validate profile ownership, permissions, and opened-file identity before launch.
+  Expand credential-path protection, filter inherited proxy credentials, add
+  independent service IPC controls, and provide `check --secrets` filename scans.
+- Use `.lilbox/tmp` when the project directory exists, otherwise per-run Linux
+  tmpfs or a private macOS directory. Support custom temporary paths; permissive
+  uses system temp. macOS private directories persist after successful runs.
+- Prompt separately for each installer profile/guide replacement, simplify
+  profile inspection, and document project-local configuration for coding agents.
+- Update rustix to 1.1.6 and add dependency advisory checks to CI and releases.
+
 ## 0.4.0 — 2026-11-11
 
 - Linux now ignores deny paths absent at startup instead of restricting parent
@@ -11,7 +63,7 @@
 - Move the open baseline into `permissive`; the shipped `default` inherits it.
   Both have embedded fallbacks. Existing standalone defaults remain valid.
 - Bundle the agent customization guide in docs and install it as config AGENTS.md.
-  Launches and init report the guide path. Installer upgrades prompt before
+  Launches report the guide path. Installer upgrades prompt before
   replacing shipped profiles/guide; decline/no terminal writes versioned
   alternatives. `--overwrite-profiles` explicitly opts into replacement.
 - Expand source comments, profile documentation, and regression coverage.
@@ -26,7 +78,7 @@
 - Initialize missing starter profiles after binary installation without
   overwriting existing configs or symlinks. Show a colored box logo, config and
   executable locations, PATH setup, quick-start commands, and recovery guidance
-  when initialization fails.
+  when profile installation fails.
 - Test installation with real native binaries, including config preservation,
   custom config locations, failure recovery, terminal colors, and PATH quoting.
 
@@ -76,5 +128,5 @@
 - Direct agent, shell, and command launch with native exit/signal behavior.
 - Open and closed profiles, credential path protection, environment scrubbing,
   private temporary storage, and network allow/deny modes.
-- Strict versioned TOML configuration and non-overwriting profile initialization.
+- Strict versioned TOML configuration and non-overwriting profile installation.
 - Portable tests, macOS enforcement tests, Just recipes, CI, and release archives.

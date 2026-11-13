@@ -156,6 +156,10 @@ persistent at `.lilbox/tmp`; permissive uses system temp. See
 
 ## Startup failures
 
+Run `lilbox doctor [PROGRAM]` for a real backend startup probe, selected-profile
+trust checks, and executable discovery with remedies. The requested program is
+never executed. See [doctor checks](profiles.md#diagnose-the-host).
+
 | Failure | What to check |
 | --- | --- |
 | macOS `sandbox_apply: Operation not permitted` | Nested Seatbelt initialization may be blocked. Try an ordinary terminal. |

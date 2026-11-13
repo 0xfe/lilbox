@@ -1,13 +1,14 @@
 <!doctype html>
+<!-- Static lilbox landing page: setup steps, copy controls, and sandbox rationale. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="lilbox runs coding agents and commands in an OS sandbox. A small layer of defence in depth for macOS and Linux.">
+  <meta name="description" content="lilbox runs coding agents and commands in an OS sandbox. A small layer of defense in depth for macOS and Linux.">
   <meta name="theme-color" content="#faf9f6">
   <link rel="canonical" href="https://mo.town/lilbox/">
   <meta property="og:title" content="lilbox — an outer sandbox for coding agents">
-  <meta property="og:description" content="A little box. One more layer of defence. For macOS and Linux.">
+  <meta property="og:description" content="A little box. One more layer of defense. For macOS and Linux.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://mo.town/lilbox/">
   <meta property="og:image" content="https://mo.town/lilbox/assets/lilbox-84d2985fa696.png">
@@ -19,11 +20,12 @@
   <style>
     :root { color-scheme: light; --paper: #faf9f6; --ink: #282927; --muted: #656760; --line: #deded7; --accent: #b34632; }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.8 "Cousine", ui-monospace, monospace; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     a { color: inherit; text-decoration: none; border-bottom: 1px dotted #9a9b93; text-underline-offset: 4px; }
     a:hover { color: var(--accent); border-bottom-color: var(--accent); border-bottom-style: solid; }
     a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
-    button, code { font: inherit; }
+    button { font: inherit; }
+    code { font-family: "Cousine", ui-monospace, monospace; font-size: inherit; }
     .wrap { width: min(100% - 40px, 760px); margin-inline: auto; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-block: 28px 0px; font-size: 13px; }
     .home { border: 0; color: var(--muted); }
@@ -33,26 +35,27 @@
     h1 { font-size: clamp(38px, 7vw, 48px); letter-spacing: -2px; line-height: 1.15; margin: 0; }
     .tagline { margin: 14px 0 30px; color: var(--muted); font-size: clamp(14px, 2.4vw, 17px); }
     .install { text-align: left; padding: 18px 20px; border: 1px solid var(--line); border-radius: 8px; background: #fff; box-shadow: 0 3px 0 #24281b05; }
-    .install-label { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; margin-bottom: 9px; color: var(--muted); font-size: 11px; letter-spacing: .04em; }
-    .command-row { display: flex; align-items: center; justify-content: center; gap: 16px; }
-    #install-command { min-width: 0; flex: 1; font-size: 13px; overflow-wrap: anywhere; user-select: all; }
+    .install-label { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; margin-bottom: 9px; color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+    .install-label h2 { margin: 0; font: inherit; text-transform: uppercase; }
+    .step-description { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+    .run-step { margin-top: 8px; padding-top: 16px; border-top: 1px solid var(--line); }
+    .command-row { display: flex; align-items: baseline; gap: 16px; }
+    .copy-text { min-width: 0; flex: 1; font-size: 13px; overflow-wrap: anywhere; user-select: all; }
     .prompt { color: var(--accent); user-select: none; }
-    #copy { flex: 0 0 56px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); cursor: pointer; font-size: 11px; }
-    #copy:hover { color: var(--accent); border-color: var(--accent); }
-    #copy[hidden] { display: none; }
+    .copy { flex: 0 0 56px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper); color: var(--ink); cursor: pointer; font-size: 11px; }
+    .copy:hover { color: var(--accent); border-color: var(--accent); }
+    .copy[hidden] { display: none; }
     .install-note { color: var(--muted); font-size: 11px; margin: 12px 0 0; }
-    #copy-status { min-height: 22px; margin: 3px 0 0; color: var(--accent); font-size: 11px; }
-    .about { max-width: 680px; margin: 22px auto 34px; }
+    .copy-status { min-height: 20px; margin: 5px 0 0; color: var(--accent); font-size: 11px; }
+    .about { max-width: 680px; margin: 28px auto 34px; }
     p { margin: 0 0 16px; }
     .about strong { font-weight: 700; }
-    .examples { border-top: 1px solid var(--line); }
-    h2 { margin: 25px 0 12px; font-size: 12px; font-weight: 400; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
-    ol { margin: 0; padding: 0; list-style: none; counter-reset: example; }
-    li { display: grid; grid-template-columns: 26px 1fr; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--line); counter-increment: example; }
-    li::before { content: "0" counter(example); color: var(--accent); font-size: 11px; padding-top: 3px; }
-    li code { display: block; font-size: 14px; overflow-wrap: anywhere; }
-    li p { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
-    .profile-note { margin: 16px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
+    .why-link { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+    .why { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 24px; }
+    .why h2 { margin: 0 0 18px; font-size: 20px; line-height: 1.4; text-transform: uppercase; }
+    .why ul { margin: 0; padding-left: 20px; }
+    .why li { margin-bottom: 18px; padding-left: 6px; }
+    .why li::marker { color: var(--accent); }
     footer { margin-top: 42px; padding-block: 20px 30px; display: flex; justify-content: space-between; gap: 20px; color: var(--muted); font-size: 11px; }
     @media (max-width: 480px) {
       .wrap { width: calc(100% - 32px); }
@@ -61,70 +64,104 @@
       .icon { width: 140px; height: 140px; }
       .install { padding: 15px 14px; }
       .command-row { gap: 10px; }
-      #install-command { font-size: 12px; }
+      .copy-text { font-size: 12px; }
       .about { font-size: 14px; margin-top: 20px; }
-      li code { font-size: 12px; }
+      .why { font-size: 14px; }
+      footer { flex-wrap: wrap; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
-      <a class="home" href="https://mo.town/">mo.town <span>/</span> lilbox</a>
+      <a class="home" href="https://mo.town/">mo.town <span>/</span> <code>lilbox</code></a>
       <a href="https://github.com/0xfe/lilbox">GitHub <span aria-hidden="true">↗</span></a>
     </header>
     <main>
       <section class="hero" aria-labelledby="title">
         <img class="icon" src="assets/lilbox-84d2985fa696.png" width="160" height="160" alt="A small cube nestled inside an open coral box" fetchpriority="high">
-        <h1 id="title">lilbox</h1>
+        <h1 id="title"><code>lilbox</code></h1>
         <p class="tagline">An outer sandbox for coding agents.</p>
+      </section>
+      <section class="copy-group" aria-labelledby="install-title">
         <div class="install">
-          <div class="install-label"><span>INSTALL LILBOX</span><span>macOS &amp; Linux · ARM64 &amp; x86_64</span></div>
+          <div class="install-label"><h2 id="install-title">Install <code>lilbox</code></h2><span>macOS &amp; Linux · ARM64 &amp; x86_64</span></div>
           <div class="command-row">
             <span class="prompt" aria-hidden="true">$</span>
-            <code id="install-command">curl -fsSL https://mo.town/lilbox/install.sh | sh</code>
-            <button id="copy" type="button" aria-label="Copy installation command" hidden>Copy</button>
+            <code class="copy-text" id="install-command">curl -fsSL https://mo.town/lilbox/install.sh | sh</code>
+            <button class="copy" type="button" data-copy="install-command" data-success="Copied. Paste into your terminal to install." aria-label="Copy installation command" hidden>Copy</button>
           </div>
         </div>
         <p class="install-note">Installs to ~/.local/bin. Linux requires bubblewrap. <a href="https://github.com/0xfe/lilbox/blob/main/docs/development.md#binary-installer">Install details</a></p>
-        <p id="copy-status" role="status" aria-live="polite"></p>
+        <p class="copy-status" role="status" aria-live="polite"></p>
       </section>
       <section class="about" aria-label="About lilbox">
-        <p>lilbox is a small <strong>defence in depth</strong> tool that runs coding agents and other commands inside an OS sandbox. It's meant to be used along with your agent’s own sandbox and other isolation mechanisms.</p>
+        <p><code>lilbox</code> is a small <strong>defense in depth</strong> tool that runs coding agents and other commands inside an OS sandbox. It's meant to be used along with your agent’s own sandbox and other isolation mechanisms. <span class="why-link">[ <a href="#why-title">Why outer sandboxes?</a> ]</span></p>
       </section>
-      <section class="examples" aria-label="Examples">
-        <ol>
-          <li><div><code>lilbox codex</code><p>Run Codex inside the default sandbox.</p></div></li>
-          <li><div><code>lilbox --profile isolated pi</code><p>Run Pi with a configured isolated <a href="https://github.com/0xfe/lilbox/blob/main/docs/profiles.md">profile</a>.</p></div></li>
-        </ol>
+      <section class="install" aria-labelledby="configure-title">
+        <div class="install-label"><h2 id="configure-title">Configure and Run</h2></div>
+        <div class="copy-group">
+          <p class="step-description">Prompt  your favourite coding agent to create a sandbox profile.</p>
+          <div class="command-row">
+            <code class="copy-text" id="configure-prompt">Read ~/.config/lilbox/AGENTS.md and create a new lilbox profile to run Claude Code with sane defaults for this git repository.</code>
+            <button class="copy" type="button" data-copy="configure-prompt" data-success="Copied. Paste into your coding agent." aria-label="Copy configuration prompt" hidden>Copy</button>
+          </div>
+          <p class="install-note">Creates a new profile in <code>./.lilbox/profile.toml</code></p>
+          <p class="copy-status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="copy-group run-step">
+          <p class="step-description">Start your agent in an outer sandbox.</p>
+          <div class="command-row">
+            <span class="prompt" aria-hidden="true">$</span>
+            <code class="copy-text" id="run-command">lilbox claude</code>
+            <button class="copy" type="button" data-copy="run-command" data-success="Copied. Paste into your terminal to run Claude Code." aria-label="Copy run command" hidden>Copy</button>
+          </div>
+          <p class="install-note">Starts Claude Code in a <code>lilbox</code> outer sandbox using above profile.</p>
+          <p class="copy-status" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+      <section class="why" aria-labelledby="why-title">
+        <h2 id="why-title">Why outer sandboxes?</h2>
+        <ul>
+          <li>Coding agents like Claude and Codex can run tools and other subcommands in local sandboxes while the agents themselves remain unsandboxed.</li>
+          <li>This can leave sensitive data, such as private keys, control sockets, or personal files exposed.</li>
+          <li>Worse, this data can be accidentally or maliciously shared with model providers or third parties through context data, tool calls, or code blocks. It can also be stored in agent memory for long periods of time.</li>
+          <li><code>lilbox</code> adds a thin but firm layer of protection around sensitive data, reducing the risk from incorrect auto-approvals or approval fatigue.</li>
+          <li><code>lilbox</code> uses native OS sandboxing to create lightweight outer sandboxes. It is not a replacement for containers or VMs.</li>
+          <li><code>lilbox</code> is particularly useful for running new, untrusted, or experimental models or coding harnesses.</li>
+          <li><strong>Obligatory</strong>: there is no perfect security. Handle with care.</li>
+        </ul>
       </section>
     </main>
     <footer><span>A tool by <a href="https://mo.town/">mo</a> for mo (but you can use it too.)</span><a href="https://github.com/0xfe/lilbox#readme">Read the docs <span aria-hidden="true">↗</span></a></footer>
   </div>
   <script>
-    const copy = document.getElementById('copy');
-    const command = document.getElementById('install-command');
-    const status = document.getElementById('copy-status');
-    let resetStatus;
-    copy.hidden = false;
-    copy.addEventListener('click', async () => {
-      clearTimeout(resetStatus);
-      try {
-        await navigator.clipboard.writeText(command.textContent.trim());
-        copy.textContent = 'Copied';
-        status.textContent = 'Copied. Paste into your terminal to install.';
-      } catch {
-        const range = document.createRange();
-        range.selectNodeContents(command);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        status.textContent = 'Command selected. Copy it with your keyboard.';
-      }
-      resetStatus = setTimeout(() => {
-        copy.textContent = 'Copy';
-        status.textContent = '';
-      }, 5000);
+    // Each step copies only its own text and reports success beside that control.
+    document.querySelectorAll('[data-copy]').forEach((copy) => {
+      const command = document.getElementById(copy.dataset.copy);
+      const status = copy.closest('.copy-group').querySelector('.copy-status');
+      let resetStatus;
+      copy.hidden = false;
+      copy.addEventListener('click', async () => {
+        clearTimeout(resetStatus);
+        try {
+          await navigator.clipboard.writeText(command.textContent.trim());
+          copy.textContent = 'Copied';
+          status.textContent = copy.dataset.success;
+        } catch {
+          // Clipboard access may be denied; keep the text manually copyable.
+          const range = document.createRange();
+          range.selectNodeContents(command);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          status.textContent = 'Text selected. Copy it with your keyboard.';
+        }
+        resetStatus = setTimeout(() => {
+          copy.textContent = 'Copy';
+          status.textContent = '';
+        }, 5000);
+      });
     });
   </script>
 </body>

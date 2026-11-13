@@ -18,12 +18,19 @@ Local `extends` names refer to global profiles, not adjacent project files.
 Relative filesystem paths always use the launch working directory.
 
 ```sh
+lilbox profile list
+lilbox init --project --extends default
+lilbox doctor claude
 lilbox profile show --all --origins
 lilbox policy
 lilbox check
 lilbox -p isolated check --strict
 ```
 
+- `profile list` shows global names/paths, embedded fallbacks, local presence, and
+  the selection reason. `show` also explains whether explicit `-p`, local policy,
+  or the global default won. Missing global/parent names receive spelling suggestions;
+  suggestions never change selection. Invalid selected policy still fails.
 - Startup prints the selected name and source path, including embedded-fallback status.
 - `show` prints `extends: child -> parent -> base`, the profile path, resolved paths,
   and configuration keys. `--origins` identifies the source of each setting.
@@ -36,6 +43,67 @@ lilbox -p isolated check --strict
 - `cani` does not execute, access the queried resource, or test connectivity.
   Host permissions, executable dependencies, and native operation rules still apply.
 - Assignment values are never printed. Colors honor `--color`, `NO_COLOR`, and `TERM`.
+
+### Create project policy
+
+```sh
+lilbox init --project --extends default
+```
+
+- Writes only `CWD/.lilbox/profile.toml` with `version = 1` and the named `extends`.
+- Validates the global parent, effective policy, and trust before publishing.
+- Creates `.lilbox` with mode 0700 and the profile with mode 0600.
+- Never overwrites an existing file, symlink, or directory. No force option:
+  review and move existing policy before retrying. Directory symlinks are rejected.
+- Does not install global starters or edit `.gitignore`. Decide whether to commit
+  the policy; ignore `.lilbox/tmp/` if retaining project scratch.
+- Run outside lilbox before launching untrusted project code. Inspect the result
+  with `lilbox profile show --origins`.
+
+### Diagnose the host
+
+```sh
+lilbox doctor           # inspect $SHELL, or /bin/sh
+lilbox doctor claude    # locate without executing claude
+```
+
+| Check | Behavior |
+| --- | --- |
+| Backend | Requires an executable native launcher at its fixed system path. |
+| Actual startup | Runs `/usr/bin/true` through embedded `isolated` policy with disposable HOME/CWD/config. Linux exercises user/mount/PID/network namespaces, seccomp, and private tmpfs; macOS exercises Seatbelt. |
+| Configuration | Loads the selected chain with normal trust rules, validates scratch paths, renders policy, and builds the filtered environment. |
+| Executable | Searches the filtered PATH or explicit path, checks host executability, and reports static execute permission. Never runs the requested program. |
+
+- Failures include a remedy; independent checks continue. Exit 1 means a failure.
+- The startup probe has a ten-second timeout and cleans its disposable files.
+- `--allow-shared-profiles` is reported explicitly; it disables owner/mode checks.
+- Startup success does not prove selected-program dependencies, network connectivity,
+  or every operation under the selected profile. No host security settings are changed.
+
+### Repair environment permissions
+
+```sh
+lilbox profile cani read-env ANTHROPIC_API_KEY
+```
+
+A denied answer names matching sensitive-name filters and explicit drop globs.
+It shows the exact-name opt-in, preserving other existing keep entries:
+
+```toml
+[environment]
+keep = ["ANTHROPIC_API_KEY"]
+```
+
+- Export the value in the parent shell; `keep` does not create it.
+- Matching `drop` rules override both `keep` and `set`. The answer names each
+  source to edit. Inherited lists are additive: `drop = []` cannot clear a parent.
+- Service pointers may also need `runtime.service_ipc = true`, which enables IPC
+  broadly. Socket access still depends on network/filesystem permissions.
+- Injection hooks have no supported profile override. Temporary-variable removal
+  points to `runtime.temporary_directory`; `OLDPWD` is always removed.
+- Proxy answers flag the extra value-dependent userinfo restriction without reading
+  or printing actual environment values.
+- Denied answers exit 1 without a second generic error message.
 
 ### Project-secret discovery
 
@@ -69,7 +137,7 @@ cannot establish that its content is safe or stop a malicious same-UID writer.
 
 ## Shipped profile comparison
 
-`init` installs the native platform's files as `default.toml` and `isolated.toml`.
+The installer copies the native platform's files as `default.toml` and `isolated.toml`.
 All three shipped profile names have embedded fallbacks. Archives contain both
 [macOS](../profiles/macos/default.toml) and [Linux](../profiles/linux/default.toml)
 configurations; the executable selects at compile time.

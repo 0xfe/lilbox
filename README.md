@@ -3,9 +3,7 @@
 [Website](https://mo.town/lilbox/)
 
 A small wrapper for running coding agents and untrusted commands inside an OS
-sandbox. The default profile grants the workspace, common coding tools, agent
-state, and selected caches. It allows networking while blocking common credential
-paths and filtering environment variables.
+sandbox.
 
 Think of it as an *outer sandbox* which serves as a defense in depth along with
 other isolation mechanisms, particularly those bundled with agent harnesses.
@@ -15,9 +13,8 @@ other isolation mechanisms, particularly those bundled with agent harnesses.
 lilbox codex
 ```
 
-Version **0.4.0** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
-through [bubblewrap](https://github.com/containers/bubblewrap). Other platforms
-refuse execution.
+Version **0.4.4** supports **macOS** through Seatbelt (`sandbox-exec`) and **Linux x86_64/aarch64**
+through [bubblewrap](https://github.com/containers/bubblewrap).
 
 See [the design](docs/design.md) for implementation details and
 [the profile reference](docs/profiles.md) for exact permissions and environment
@@ -36,10 +33,10 @@ export PATH="$HOME/.local/bin:$PATH"
 Choose an alternate installation prefix or a specific release:
 
 ```sh
-curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.0
+curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /usr/local --version 0.4.4
 ```
 
-Then create a new profile for your project with  your favourite coding agent using a prompt like:
+Then create a new profile for your project with your favourite coding agent using a prompt like:
 
 
 ```
@@ -64,11 +61,11 @@ lilbox [OPTIONS] <PROGRAM> [ARGS...]
 | Command | Purpose |
 | --- | --- |
 | `lilbox -v`, `-V`, `--version` | Print the embedded binary version. |
+| `lilbox doctor [PROGRAM]` | Diagnose backend startup, executable lookup, and profile trust. |
+| `lilbox init --project --extends default` | Create `.lilbox/profile.toml`; never overwrite an existing file. |
+| `lilbox profile list` | List profiles and explain local/global selection. |
 | `lilbox shell` | Start an interactive shell without user startup files. |
 | `lilbox exec <PROGRAM> [ARGS...]` | Run a program, including names that overlap lilbox commands. |
-| `lilbox init` | Create missing starter profiles and the agent guide. |
-| `lilbox init --versioned` | Preserve existing files and write versioned alternatives. |
-| `lilbox init --overwrite-profiles` | Replace shipped regular files explicitly. |
 | `lilbox [-p NAME] check [--strict]` | Check all profiles, or one profile and its parents. |
 | `lilbox [-p NAME] policy` | Inspect the indented, colored native policy. |
 | `lilbox [-p NAME] profile check [--strict]` | Same checks as `lilbox check`. |
@@ -95,7 +92,13 @@ Profile selection, in priority order:
 | 2 | `.lilbox/profile.toml` in the current working directory, if present. |
 | 3 | Global `default.toml`, or the embedded default. |
 
-Use `lilbox [-p <profile>] profile show` to inspect a profile.
+Use `lilbox profile list` to discover profiles and see why one was selected.
+`lilbox [-p <profile>] profile show` explains the effective permissions and selection.
+Misspelled global names get suggestions; no correction is applied automatically.
+
+Create project policy with `lilbox init --project --extends default`. It validates
+the global parent and refuses to overwrite `.lilbox/profile.toml`. Global starter
+profiles are still installed by the installer.
 
 The global profile directory is selected by `--config-dir DIR`, then
 `$XDG_CONFIG_HOME/lilbox`, then `~/.config/lilbox`.

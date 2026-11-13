@@ -1,140 +1,198 @@
 # Development and releases
 
-See [AGENTS.md](../AGENTS.md) for repository conventions and security constraints,
-and [design.md](design.md) for module responsibilities.
+Repository conventions: [AGENTS.md](../AGENTS.md). Architecture and module map:
+[design.md](design.md).
+
+- [Build and run](#everyday-commands)
+- [Test changes](#tests)
+- [Publish a release](#publish-a-release)
+- [Build a local archive](#build-a-local-archive)
+- [Binary installer](#binary-installer)
+- [Publish the hosted installer](#publish-the-hosted-installer)
+- [Website](#website)
 
 ## Prerequisites
 
-| Work | Requirements |
+| Task | Requirements |
 | --- | --- |
-| Build and portable checks | Rust/Cargo 1.85+, rustfmt, Clippy, and Just. Use current stable without raising the declared minimum. |
-| macOS enforcement | A host permitting `/usr/bin/sandbox-exec`; developer tools for the C certificate probe. |
+| Build and portable checks | Rust/Cargo 1.85+, rustfmt, Clippy, Just, and Python 3.9+ for script tests. |
+| macOS enforcement | A host that permits `/usr/bin/sandbox-exec`; developer tools for the C certificate probe. |
 | Linux enforcement | `/usr/bin/bwrap` 0.6.3+, permitted user namespaces and seccomp, Python 3, and public CA certificates. |
-| Release packaging | Python 3.9+ and the target's Rust toolchain/linker. |
+| Package an archive | Python 3.9+ and the target's Rust toolchain/linker. |
+| Prepare or publish a release | Git, authenticated GitHub CLI, a clean checkout, and access to `origin` and the GitHub API. |
+| Upload installer or website | Authenticated Google Cloud CLI with write access to the destination bucket. |
+
+Use current stable Rust without silently raising the minimum in `Cargo.toml`.
 
 ## Everyday commands
 
 | Command | Purpose |
 | --- | --- |
 | `just` | List recipes. |
-| `just build` | Build with locked dependencies. |
-| `just run --help` | Run the debug executable. |
+| `just build` | Build the debug executable with locked dependencies. |
+| `just run --help` | Show CLI help from the debug build. |
 | `just run policy` | Inspect the native sandbox policy. |
 | `just fmt` | Format Rust sources. |
-| `just install` | Install to `~/.local/bin`. |
-| `just install /custom/prefix` | Install to `PREFIX/bin`. |
+| `just install` | Build and install the executable to `~/.local/bin`. |
+| `just install /custom/prefix` | Install the executable to `/custom/prefix/bin`. |
+
+The [binary installer](#binary-installer) also installs profiles and the agent guide.
 
 ## Tests
 
 | Command | Coverage |
 | --- | --- |
-| `just check` | Formatting, Clippy with warnings denied, unit/CLI tests, and offline installer/release-script tests. |
-| `just test-sandbox` | Actual enforcement on the current host OS. |
-| `just verify` | Both sets of checks. |
-| `just test-release` | Build the native executable; offline installer and release-request regressions, including real config initialization; Python 3.9+ required. |
+| `just check` | Formatting, Clippy with warnings denied, unit/CLI tests, installer/release tests, and website checks. |
+| `just test-sandbox` | Actual sandbox enforcement on the current host OS. |
+| `just verify` | `check` plus `test-sandbox`. |
+| `just test-release` | Build the native executable and test installation/release scripts with offline fixtures. |
+| `just test-www` | Validate website assets and test uploads with fake gcloud. |
+| `just audit` | Query OSV for dependency advisories; requires network access. |
 
-Host tests use temporary homes and fake credentials. They cover filesystem denies,
-symlinks, ancestor renames, networking, descendants, descriptors, signals, and
-terminal behavior. The macOS [certificate probe](../tests/fixtures/trust_roots.c)
-compares public trust settings without network access or private keys.
+### Choose the checks
 
-- Ordinary `cargo test` intentionally ignores host enforcement tests.
-- Run `just verify` for permission, path, environment, launch, or network changes.
-- Report host restrictions as limitations, not successful enforcement. Nested
-  Seatbelt can fail with `sandbox_apply: Operation not permitted`; Linux hosts
-  may block namespace or seccomp setup.
-- For documentation-only changes, verify links, commands, source consistency,
-  and `git diff --check`. Inspect the archive if its contents change.
-
-For release-specific launch changes, also test the optimized executable:
+| Change | Verification |
+| --- | --- |
+| Permissions, paths, environment, launch, or networking | Add meaningful regression coverage and run `just verify`. |
+| Release-specific launch behavior | Also run optimized enforcement tests below. |
+| Documentation only | Check links, commands, source consistency, and `git diff --check`. |
+| Archive contents | Inspect and [verify the archive](#verify-the-archive). |
 
 ```sh
-# macOS
+# Optimized enforcement on macOS
 cargo test --release --locked --test seatbelt -- --ignored --test-threads=1
-# Linux
+
+# Optimized enforcement on Linux
 cargo test --release --locked --test bubblewrap -- --ignored --test-threads=1
 ```
 
-CI runs on every push and pull request. The shared
-[verification workflow](../.github/workflows/verify.yml) uses native ARM64 and
-x86_64 runners on both macOS and Linux. Each job checks formatting, Clippy, unit
-and CLI tests, installer/release-script tests, real sandbox enforcement, and the
-packaged executable. CI uploads temporary Actions artifacts; it never creates
-GitHub releases. A successful local run does not verify other platforms or remote CI.
+### Host enforcement
 
-The macOS jobs use `macos-15` (ARM64) and `macos-15-intel`. On the disposable
-Ubuntu 24.04 runners, CI loads an AppArmor profile granting `/usr/bin/bwrap` the
-`userns` permission, then probes user/PID/network namespace startup before tests.
-Ubuntu's global unprivileged-user-namespace restriction stays enabled. This is
-runner provisioning only: lilbox and its installer never change host AppArmor
-policy. All enforcement tests still run as the unprivileged runner user.
+- Ordinary `cargo test` skips enforcement tests; run them explicitly.
+- Fixtures use temporary homes and fake credentials. Never use real user profiles.
+- Coverage includes filesystem denies, symlinks, ancestor renames, networking,
+  descendants, descriptors, signals, and terminal behavior.
+- The macOS [certificate probe](../tests/fixtures/trust_roots.c) compares public
+  trust settings without network access or private keys.
+
+| Host restriction | What to report |
+| --- | --- |
+| Nested Seatbelt returns `sandbox_apply: Operation not permitted` | Enforcement could not run in that environment. |
+| Linux blocks namespace or seccomp setup | Enforcement could not run under that host policy. |
+| Only one platform tested locally | Other platforms and remote CI remain unverified. |
+
+Do not skip failures or report blocked tests as successful enforcement.
+
+## Diagnostic regression coverage
+
+| Suite | Checks |
+| --- | --- |
+| Portable CLI tests | Local/global selection, spelling suggestions, project creation, overwrite/symlink protection, and environment repair instructions. |
+| Shared doctor test in both native suites | Actual startup, missing-executable remedies, trust failures, and launch output without the help-only coding-agent prompt. |
+
+Doctor fixtures use disposable homes and configuration directories.
+
+## Continuous integration
+
+Pushes and pull requests use the shared
+[verification workflow](../.github/workflows/verify.yml).
+
+| Platform | Native runners |
+| --- | --- |
+| macOS | `macos-15` for ARM64; `macos-15-intel` for x86_64. |
+| Linux | `ubuntu-24.04-arm` for ARM64; `ubuntu-24.04` for x86_64. |
+
+Each platform runs portable tests, installer tests, host enforcement, packaging,
+and archive smoke tests. Linux also checks static linking. A separate job checks
+workflows, shell scripts, website deployment, and dependency advisories.
+
+CI stores temporary Actions artifacts; it does not publish releases.
+
+**Linux runner setup:**
+
+- Grant only `/usr/bin/bwrap` AppArmor `userns` permission; keep Ubuntu's global restriction.
+- Probe user/PID/network namespaces before tests; run enforcement as the unprivileged user.
+- Apply this only to disposable CI runners. lilbox and its installer never change host AppArmor policy.
 
 ## Publish a release
 
-Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login`
-using an account permitted to read releases and run this repository's Actions
-workflows. Version preparation needs Python 3.9+, Git, a clean checkout, and access
-to `origin` and the GitHub API.
+### Prepare
 
-Prepare the next patch version, or choose an explicit newer version:
+Start with a clean checkout and authenticate GitHub CLI:
 
 ```sh
-just bump                  # increment the patch component
-just bump 0.4.0            # alternatively, choose a version (v0.4.0 also works)
+gh auth login
+just version
+just bump                 # prepare the next patch version
+# Or: just bump X.Y.Z     # choose a newer stable version
 ```
 
-[`scripts/version.py`](../scripts/version.py) updates `Cargo.toml`, the root
-package in `Cargo.lock`, README version references, and `CHANGELOG.md`. The README
-version heading and pinned installer example are required; a startup-banner
-example is updated and checked only when present. An
-`Unreleased` heading becomes a dated release entry; otherwise, commit subjects
-since the latest available ancestor release tag seed a new entry. Review these
-generated notes before publishing. Dependency versions and old changelog entries
-remain unchanged.
+The account must read releases and dispatch workflows. `release.yml` must exist on `main`.
 
-Then review, verify, commit, and push manually:
+[`scripts/version.py`](../scripts/version.py) prepares these files:
+
+| File | Change |
+| --- | --- |
+| `Cargo.toml` | Package version; this is the version source. |
+| `Cargo.lock` | Root package version only. |
+| `README.md` | Version heading, pinned installer example, and optional startup-banner version. |
+| `CHANGELOG.md` | Dated release entry. |
+
+Review the generated notes: they come from `Unreleased`, or commit subjects since
+the latest ancestor release tag. Dependencies and historical entries stay unchanged.
+README's version heading and pinned installer example are required; the banner is optional.
+
+### Verify and publish
 
 ```sh
 just verify
+just audit
+git diff --check
 git add Cargo.toml Cargo.lock README.md CHANGELOG.md
 git commit -m "Bump version for release"
 git push origin main
 just release
 ```
 
-`just release [VERSION]` accepts an optional version. If it is newer than the
-current version, it prepares the same four files and stops with instructions to
-verify, commit, and push manually. Run it again after those steps to publish.
-With no argument, or with the current version, it requires a clean checkout on
-`main` whose HEAD equals the live `origin/main`, then dispatches the
-[release workflow](../.github/workflows/release.yml) for that exact commit and
-version. Neither command commits or pushes. Local verification is manual;
-publication always waits for the workflow's full verification. The workflow must
-first be present on GitHub's default branch (`main`).
+Neither `just bump` nor `just release` commits or pushes for you.
 
-Versions must be stable `X.Y.Z` numbers without leading zeros, prerelease suffixes,
-or build metadata; a leading `v` is accepted by the Just commands. Each component
-must fit Cargo's unsigned 64-bit limit. A bump must increase the current version.
-Both preparation and publication require a version greater than every existing
-stable local tag, remote tag, and GitHub release, including drafts. An unavailable
-remote history blocks the command. The workflow repeats these checks before
-building and immediately before publication, so using the Actions UI cannot
-bypass version validation.
+| Command | Behavior |
+| --- | --- |
+| `just release` | Publish the current version from clean, pushed `main`. |
+| `just release CURRENT_VERSION` | Same as above. |
+| `just release NEWER_VERSION` | Prepare the version and stop. Verify, commit, push, then rerun to publish. |
 
-Only this explicit `workflow_dispatch` publishes: pushes, tags, and pull requests
-do not request releases. The Actions UI can also dispatch the same workflow with
-the full main commit SHA and version. If main moves before dispatch, validation
-fails; synchronize and request again.
+Local HEAD must match live `origin/main`. [release.yml](../.github/workflows/release.yml)
+receives that exact commit and version.
 
-The release workflow repeats the full four-platform verification and adds
-optimized host enforcement tests. After every job succeeds, it verifies the
-complete archive/checksum set and creates `vVERSION` at the tested commit,
-attaches all four archives, their SHA-256 files, and `install.sh`, and publishes
-the GitHub release as latest. Builds have read-only repository permissions; only
-the final publication job has `contents: write`, using GitHub's built-in token.
-No personal publishing token is needed. Repository rules must permit the workflow
-token to create release tags. A failed upload can leave a draft; inspect it before
-retrying. An existing tag/release is never overwritten automatically.
+### Version rules
+
+- Use stable `X.Y.Z`; no leading zeros, prerelease suffixes, or build metadata.
+- Just commands accept a leading `v`. Each component must fit an unsigned 64-bit integer.
+- A bump must increase the current package version.
+- The proposed release must exceed every stable local tag, remote tag, and GitHub
+  release, including drafts.
+- If remote history is unavailable, preparation/publication stops.
+- Validation runs again before building and immediately before publication.
+
+### What the workflow does
+
+1. Validate the requested main commit and version.
+2. Run all four platforms' checks, including optimized host enforcement.
+3. Verify the complete archive and SHA-256 file set.
+4. Create `vVERSION` at the tested commit and publish the release as latest.
+
+Release assets: four native archives, four SHA-256 files, and `install.sh`.
+
+- Publish through `just release` or Actions `workflow_dispatch` with the full main SHA
+  and version. Pushes, tags, and pull requests never publish.
+- If main moves before dispatch, synchronize and request again.
+- Builds are read-only. Publication uses `contents: write` and GitHub's built-in token;
+  repository rules must permit tag creation.
+- Existing tags/releases are never overwritten. A failed upload may leave a draft;
+  inspect it before retrying.
+
+Monitor the run:
 
 ```sh
 gh run list --workflow release.yml
@@ -144,119 +202,140 @@ gh run watch RUN_ID
 ## Build a local archive
 
 ```sh
-just version
-just package                         # native target; no publication
+just package                         # native target; local output only
 just package x86_64-apple-darwin       # explicit target
 ```
 
-[`scripts/release.sh`](../scripts/release.sh) supports these targets:
+Cross-compilation needs the matching linker and Rust target:
+
+```sh
+rustup target add x86_64-apple-darwin
+```
+
+Supported targets in [scripts/release.sh](../scripts/release.sh):
 
 | OS | Published targets | Additional local targets |
 | --- | --- | --- |
-| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | None |
-| Linux | `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` | The corresponding `unknown-linux-gnu` targets |
+| macOS | `aarch64-apple-darwin`, `x86_64-apple-darwin` | None. |
+| Linux | `aarch64-unknown-linux-musl`, `x86_64-unknown-linux-musl` | Corresponding `unknown-linux-gnu` targets. |
 
-The published Linux binaries use musl static linking so they work on glibc and
-musl distributions without requiring the build runner's glibc version. Bubblewrap
-remains a system runtime dependency and is not bundled. Install the matching Rust
-target and linker before local cross-compilation; for example,
-`rustup target add x86_64-apple-darwin` installs that Rust target.
+- Published Linux binaries use static musl linking for glibc and musl distributions.
+- Bubblewrap remains a system dependency; it is not bundled.
+- `just package` does not tag, sign, notarize, or publish anything.
 
 ## Verify the archive
 
-Artifacts are written to `dist/`:
+Output files in `dist/`:
 
-- `lilbox-VERSION-TARGET.tar.gz`
-- `lilbox-VERSION-TARGET.tar.gz.sha256`
+```text
+lilbox-VERSION-TARGET.tar.gz
+lilbox-VERSION-TARGET.tar.gz.sha256
+```
 
-From that directory, verify the checksum:
+Replace the placeholders with your archive's version and target. From `dist/`:
 
 ```sh
 # macOS
 shasum -a 256 -c lilbox-VERSION-TARGET.tar.gz.sha256
+
 # Linux
 sha256sum -c lilbox-VERSION-TARGET.tar.gz.sha256
 ```
 
-Then extract and smoke-test the executable on a matching host, using temporary
-home/config directories. Confirm the archive includes the executable, README,
-license, changelog, `install.sh`, all three profiles, `examples/`, and `docs/`,
-including `docs/LILBOX-AGENTS.md`. Init installs the guide as config `AGENTS.md`.
-The automated host check is `python3 scripts/verify-archive.py dist/ARCHIVE.tar.gz`;
-it verifies checksums, contents, version flags, and launches with both profiles.
+From the repository root, on a matching host:
+
+```sh
+python3 scripts/verify-archive.py dist/ARCHIVE.tar.gz
+```
+
+The check uses disposable homes/configs and local downloads. It verifies checksums,
+contents, version flags, installed profile/guide bytes, and real sandbox launches
+under `default` and `isolated`.
+
+Archives contain:
+
+- `lilbox`, `install.sh`, README, license, and changelog.
+- Both platforms' default/isolated profiles and shared permissive profile.
+- `examples/` and `docs/`, including `LILBOX-AGENTS.md` installed as config `AGENTS.md`.
 
 | Packaging property | Behavior |
 | --- | --- |
-| Dependencies | Build uses `Cargo.lock`. |
-| Archive metadata | File order, ownership, modes, timestamps, and gzip headers are normalized. |
-| Reproducibility | Identical input bytes produce identical archives; compiler/SDK changes can change the binary. |
-| Signing | Archives are unsigned and not notarized. |
-| Publishing | `just package` is local only; `just release` explicitly requests GitHub publication. |
+| Dependencies | Builds use `Cargo.lock`. |
+| Metadata | File order, ownership, modes, timestamps, and gzip headers are normalized. |
+| Reproducibility | Identical input bytes produce identical archives. Compiler/SDK changes can change the binary. |
+| Signing | Archives are unsigned; macOS binaries are not notarized. |
 
 ## Binary installer
 
 ```sh
 curl -fsSL https://mo.town/lilbox/install.sh | sh
+
+# Choose a prefix
+curl -fsSL https://mo.town/lilbox/install.sh | sh -s -- --prefix /custom/prefix
 ```
 
-[`install.sh`](../install.sh) defaults to the latest stable GitHub release and
-`~/.local/bin`. `--version X.Y.Z` (optionally prefixed with `v`) pins a release;
-`--prefix /absolute/path` installs to `PREFIX/bin`. The script works with POSIX
-`sh`, including when piped from curl, and needs curl, tar, mktemp, and either
-sha256sum or shasum. It supports the four published targets above and refuses
-other operating systems/architectures.
+[`install.sh`](../install.sh) runs with POSIX `sh`, including when piped from curl.
+It needs curl, tar, mktemp, and either sha256sum or shasum.
 
-Downloads use HTTPS. Before replacement, the installer checks the archive hash,
-extracts only the executable, and verifies its embedded version. A temporary file
-in the destination directory permits atomic replacement; failed downloads/checks
-leave an existing installation intact. Destination symlinks/directories are
-rejected. After replacement, the installer invokes that exact executable's `init`
-command to install default/permissive/isolated profiles and `AGENTS.md` in
-`${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. Each existing shipped file gets a separate
-confirmation prompt via `/dev/tty`, which works with piped installer input.
-Each decision uses `init --file NAME` with overwrite or versioned mode.
-Declining or having no usable controlling terminal selects a versioned alternative:
-existing files/symlinks are preserved, and alternatives such as
-`default.toml.0.4.0` and `AGENTS.md.0.4.0` are written without clobbering prior
-alternatives. These are inactive until reviewed and renamed.
+| Setting | Default or option |
+| --- | --- |
+| Release | Latest stable; `--version X.Y.Z` pins one. A leading `v` is accepted. |
+| Executable | `~/.local/bin/lilbox`; `--prefix /absolute/path` selects `PREFIX/bin`. |
+| Configuration | `${XDG_CONFIG_HOME:-$HOME/.config}/lilbox`. |
+| Platforms | The four published targets above; other OS/architecture combinations fail. |
+| Linux host | Requires bubblewrap and permitted namespaces/seccomp. See [backend requirements](design.md#linux-bubblewrap-backend). |
 
-The executable embeds the native `profiles/macos/` or `profiles/linux/` defaults;
-archives contain both sets. Older 0.4 binaries without `init --file` retain their
-compatible versioned/overwrite behavior without per-file prompts.
+### Replacement and recovery
 
-Pinned pre-0.4 releases use their original non-overwriting init without the new
-flags or guide; an overwrite request for those versions is rejected before install.
+The installer:
 
-Passing `--overwrite-profiles` to the installer opts into `init --overwrite-profiles`
-without prompting. It replaces shipped regular files atomically, refuses symlink
-or non-regular destinations, and preserves custom named profiles. Ordinary direct
-`lilbox init` still only fills missing files. Init prints the customization-guide
-path, as do launches. Initialization requires no backend. Failure reports a
-partial installation and a retry command; earlier files may already be written.
+1. Downloads the archive and checksum over HTTPS.
+2. Verifies the checksum and extracts fixed member paths only.
+3. Rejects symlinks, non-regular source files, and missing required bundled files.
+4. Checks the executable's embedded version.
+5. Replaces the executable atomically using a temporary file beside it.
 
-Progress messages identify platform selection, release lookup, archive/checksum
-downloads, checksum verification, extraction, copying, executable validation,
-installation, and profile initialization. The completion screen includes a box
-logo, executable/config paths, a quoted PATH
-command when needed, quick-start commands, and a reminder of the default profile's
-closed coding permissions (or the preserved installed profile's settings).
-Color follows stdout's terminal status (so `curl | sh` still uses
-color interactively), and is disabled by `NO_COLOR` (even empty) or `TERM=dumb`.
-No sudo, shell startup edits, or system package installation is performed. Missing
-Linux bubblewrap is reported with installation instructions; kernel restrictions
-must still allow actual execution.
+- Download/validation failure: the existing executable stays intact.
+- Profile-copy failure after replacement: report a partial install and exit nonzero.
+  Fix the problem and rerun; earlier files may already be installed.
 
-`just test-release` tests checksums, download failures, platform selection, upgrades,
-initialization failure reporting, terminal colors, and PATH quoting. It also
-installs the actual built executable into temporary prefixes and homes to verify
-fresh configs, missing-profile creation, custom XDG paths, and preservation of
-existing files/symlinks, versioned alternatives, explicit overwrite, and both
-interactive prompt responses. CI runs these tests with each native target's binary.
-Downloads are fixture-backed; tests never contact GitHub or modify real profiles.
+### Profile handling
 
-Checksums detect damaged or mismatched downloads; they are distributed from the
-same GitHub release and are not an independent signing trust root. macOS binaries
-are unsigned and not notarized.
+The installer copies configuration directly from the verified archive.
+
+| Destination state | Action |
+| --- | --- |
+| Missing shipped file | Install it. |
+| Existing shipped file | Ask separately through `/dev/tty`, including with piped input. |
+| Declined prompt or no terminal | Preserve it; write inactive `NAME.toml.VERSION` or `AGENTS.md.VERSION`. |
+| Existing versioned alternative | Preserve it. |
+| `--overwrite-profiles` or approved prompt | Replace regular shipped files; reject symlinks and non-regular destinations. |
+| Custom named profile | Preserve it. |
+
+- New config directories use mode 0700; staged files use mode 0600.
+- New files use a hard link without clobbering; approved replacements use a rename.
+- Select native files from `profiles/macos/` or `profiles/linux/`; legacy `profiles/` layouts work too.
+- Copy only bundled files. Without a legacy agent guide, link to that version's profile docs.
+
+### Output and limits
+
+- Progress shows download, verification, extraction, and installation stages.
+- Completion shows the box logo, executable/config paths, PATH reminder, and agent prompt.
+- Color requires a stdout terminal and is disabled by `NO_COLOR` or `TERM=dumb`.
+- No sudo, shell startup edits, or system package installation.
+- Release checksums detect corruption; they are not an independent signing trust root.
+
+### Installer tests
+
+`just test-release` covers:
+
+- Checksums, download failures, platform selection, upgrades, and partial failures.
+- Fresh configs, missing files, custom XDG paths, and private file permissions.
+- Existing files/symlinks, versioned alternatives, overwrite flags, and both prompt responses.
+- Terminal colors and completion text.
+
+Tests use each target's actual binary, temporary homes/prefixes, and fixture-backed
+downloads. They never contact GitHub or modify real user configs.
 
 ## Publish the hosted installer
 
@@ -265,42 +344,44 @@ just test-release
 just release-installer
 ```
 
-The standalone installer is served at **https://mo.town/lilbox/install.sh**.
-[`scripts/release-installer.sh`](../scripts/release-installer.sh) follows
-[Jungle's upload script](https://github.com/0xfe/jungle/blob/main/upload.sh): it
-uses authenticated Google Cloud CLI (`gcloud storage cp`) to upload the current
-local `install.sh` to `gs://muthanna.com/lilbox/install.sh`. `mo.town` and
-`muthanna.com` serve the same bucket; use the `mo.town` URL in installation commands.
-Install and authenticate gcloud with an account allowed to write that object.
+| Property | Value |
+| --- | --- |
+| Script | [scripts/release-installer.sh](../scripts/release-installer.sh). |
+| Public URL | `https://mo.town/lilbox/install.sh`. |
+| Storage object | `gs://muthanna.com/lilbox/install.sh`. |
+| Access and type | `publicRead`, `Content-Type: text/plain`. |
+| Cache | `public,max-age=300,must-revalidate`. |
 
-The script stages a snapshot, checks its shell syntax, uploads only that object
-with `publicRead`, `Content-Type: text/plain`, and
-`Cache-Control: public,max-age=300,must-revalidate`, then reads it back from GCS
-and compares the bytes. A failed upload or mismatch exits unsuccessfully. Public
-caches may take up to five minutes to refresh. Avoid concurrent installer uploads.
+- Snapshot the local script, check shell syntax, upload, and compare GCS readback bytes.
+- Fail on upload/readback errors. Allow five minutes for public caches to refresh.
+- Avoid concurrent uploads. Tests use fake gcloud.
+- `mo.town` and `muthanna.com` share the bucket; public links use mo.town.
 
-This command publishes the local installer independently of binary releases; it
-does not bump, commit, push, or dispatch GitHub Actions. Ordinary CI and
-`just release` do not upload to this bucket. The hosted installer still downloads
-binaries/checksums from GitHub Releases. Deployment tests stub gcloud and never
-write to the real bucket.
+This is separate from bump/commit/push and GitHub releases. CI and `just release`
+never upload here. The hosted installer fetches binaries/checksums from GitHub Releases.
 
 ## Website
 
-The landing page at **https://mo.town/lilbox/** lives in `www/index.html`, with
-embedded CSS/JavaScript and a generated icon in `www/assets/`. It needs no build
-step. Run `just serve` to preview at `http://127.0.0.1:8000/`, `just test-www` for
-static/deployment checks, and `just upload` to publish using authenticated gcloud.
-The upload target is `gs://muthanna.com/lilbox/`. Fingerprinted images upload
-before `index.html`, with one-day image caching and five-minute page caching.
-Existing bucket objects, including the separately published installer, are
-preserved. See the [website README](https://github.com/0xfe/lilbox/blob/main/www/README.md)
-for details and icon provenance.
+The static page lives in [www/index.html](../www/index.html), with embedded CSS/JS
+and images in `www/assets/`. No build step is needed.
+
+```sh
+just serve       # http://127.0.0.1:8000/
+just test-www    # offline asset and deployment checks
+just upload      # publish with authenticated gcloud
+```
+
+Public URL: `https://mo.town/lilbox/`. Storage: `gs://muthanna.com/lilbox/`.
+
+- Fingerprinted images upload first and cache for one day.
+- `index.html` uploads last and caches for five minutes.
+- Old assets and the separately deployed installer are preserved.
+- See [www/README.md](../www/README.md) for editing, deployment, and icon provenance.
 
 ## Extend lilbox
 
-- Configuration and network capabilities belong in the typed policy.
-- Each backend must enforce every requested capability or reject the profile.
+- Represent configuration/network capabilities in the typed policy.
+- Each backend must enforce a requested capability or reject it.
 - A managed proxy needs lifecycle management and direct-connection restrictions;
   proxy environment variables alone do not enforce routing.
 - Update the profile reference and design docs with implementation changes.
@@ -310,14 +391,18 @@ See [extension points](design.md#extending-the-system) and the historical
 
 ## Dependency advisory gate
 
-- `just audit` queries OSV for every registry package/version in `Cargo.lock`,
-  including dependencies for other platforms. It requires network access.
-- The shared CI/release workflow fails on active advisories, API errors, or
-  incomplete responses. Withdrawn advisories do not block builds.
-- `.github/dependabot.yml` schedules Cargo and GitHub Actions updates. Repository
-  administrators separately manage GitHub alert/security-update settings.
-- No advisory exceptions are configured. If an exception is unavoidable, require
-  a reviewed change naming the advisory, unreachable API evidence, owner, and an
-  expiry of at most 30 days. Add explicit expiry enforcement before using it;
-  never disable the gate or add an unbounded ignore list.
-- Offline regression fixtures exercise active/withdrawn advisories and API errors.
+```sh
+just audit
+```
+
+- OSV checks cover every registry package/version in `Cargo.lock`, including
+  dependencies for other platforms.
+- CI/releases fail on active advisories, API errors, or incomplete responses.
+  Withdrawn advisories do not block builds.
+- [.github/dependabot.yml](../.github/dependabot.yml) schedules Cargo and Actions updates.
+  Repository administrators manage GitHub alerts and security-update settings separately.
+- Offline fixtures cover active/withdrawn advisories and API errors.
+
+No exceptions are configured. Any exception needs review, an advisory ID,
+unreachable-API evidence, an owner, and an expiry within 30 days. Implement expiry
+enforcement first; never disable the gate or use an unbounded ignore list.
