@@ -32,6 +32,8 @@ pub struct Answer {
     pub allowed: Option<bool>,
     /// Matching rule or reason, without any environment assignment values.
     pub reason: String,
+    /// Repair instructions and TOML lines, never assignment values from the environment.
+    pub advice: Vec<String>,
 }
 
 /// Build a definite policy answer.
@@ -39,7 +41,146 @@ fn answer(allowed: bool, reason: impl Into<String>) -> Answer {
     Answer {
         allowed: Some(allowed),
         reason: reason.into(),
+        advice: Vec::new(),
     }
+}
+
+/// Explain every applicable name filter and the narrowest editable repair.
+/// The sentinel contains no user value; proxy-userinfo filtering is value-dependent.
+fn environment_answer(loaded: &LoadedProfile, paths: &ContextPaths, input: &str) -> Result<Answer> {
+    if !environment::valid_name(input) {
+        bail!("expected an environment variable name, not an assignment");
+    }
+    let profile = &loaded.profile;
+    let settings = &profile.environment;
+    let probe = environment::build(profile, paths, [(OsString::from(input), OsString::new())])?;
+    let allowed = probe.contains_key(std::ffi::OsStr::new(input));
+    let upper = input.to_ascii_uppercase();
+    let mut result = answer(allowed, "");
+    if matches!(input, "HOME" | "PWD" | "PATH" | "LILBOX") {
+        result.reason =
+            "mandatory launch normalization supplies this name; PATH entries are sanitized".into();
+        return Ok(result);
+    }
+    if matches!(input, "TMPDIR" | "TMP" | "TEMP" | "OLDPWD") {
+        result.reason = "launch normalization controls scratch/working-directory variables".into();
+        if input == "OLDPWD" {
+            result
+                .advice
+                .push("OLDPWD is always removed; no profile override is supported.".into());
+        } else if !allowed {
+            result.advice.extend([
+                "Set this in the selected profile:".into(),
+                "[runtime]".into(),
+                "temporary_directory = true".into(),
+            ]);
+        }
+        return Ok(result);
+    }
+    if let Some(pattern) = environment::INJECTION_PATTERNS
+        .iter()
+        .find(|p| environment::matches_pattern(&upper, p))
+    {
+        result.reason = format!("unconditional runtime injection filter {pattern:?}");
+        result.advice.push("No profile override is supported: keep cannot restore this name and set rejects it. Use the program's explicit command-line options instead.".into());
+        return Ok(result);
+    }
+    let keep = settings
+        .keep
+        .iter()
+        .find(|p| environment::matches_pattern(&upper, &p.to_ascii_uppercase()));
+    let assigned = settings.set.contains_key(input);
+    let inherits = settings.inherit.unwrap_or(profile.mode == Mode::Open);
+    let sensitive: Vec<_> = environment::SENSITIVE_PATTERNS
+        .iter()
+        .filter(|p| upper != "AWS_CA_BUNDLE" && environment::matches_pattern(&upper, p))
+        .collect();
+    let mut reasons = Vec::new();
+    if !profile.runtime.service_ipc && environment::SERVICE_VARIABLES.contains(&upper.as_str()) {
+        reasons.push("runtime.service_ipc=false removes this service pointer".into());
+        result.advice.extend(["To pass this service pointer, also set:".into(), "[runtime]".into(), "service_ipc = true".into(), "This enables service IPC broadly; socket access still depends on network and filesystem rules.".into()]);
+    }
+    for pattern in &settings.drop {
+        if !environment::matches_pattern(&upper, &pattern.to_ascii_uppercase()) {
+            continue;
+        }
+        reasons.push(format!(
+            "environment.drop {pattern:?} [{}] overrides keep and set",
+            loaded.origin("environment.drop", Some(pattern))
+        ));
+        // Lists are additive, so every occurrence in the inheritance chain must change.
+        for (document, source) in loaded.documents.iter().zip(&loaded.sources) {
+            if document
+                .fields
+                .get("environment")
+                .and_then(|v| v.get("drop"))
+                .and_then(|v| v.as_array())
+                .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(pattern)))
+            {
+                result.advice.push(format!("Remove or narrow environment.drop entry {pattern:?} in {}{} so it no longer matches {input}. Inherited lists are additive; drop = [] in a child does not clear them.", source.display(), if document.embedded { " (embedded: create a reviewed replacement of this parent first)" } else { "" }));
+            }
+        }
+    }
+    if assigned {
+        reasons.push(format!(
+            "environment.set {input} [{}]; value hidden",
+            loaded.origin(&format!("environment.set.{input}"), None)
+        ));
+    } else if let Some(pattern) = keep {
+        reasons.push(format!(
+            "environment.keep {pattern:?} [{}] admits the parent variable",
+            loaded.origin("environment.keep", Some(pattern))
+        ));
+    } else {
+        if !inherits {
+            reasons.push("environment.inherit=false and no matching environment.keep".into());
+        }
+        if !sensitive.is_empty() {
+            reasons.push(format!(
+                "built-in sensitive-name filter: {} (explicit keep can override)",
+                sensitive
+                    .iter()
+                    .map(|p| format!("{p:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !inherits || !sensitive.is_empty() {
+            if loaded
+                .documents
+                .last()
+                .is_some_and(|document| document.embedded)
+            {
+                let parent = loaded.chain.last().unwrap();
+                result.advice.push(format!("The selected profile is embedded. Create an editable project child with `lilbox init --project --extends {parent}`; if local policy already exists, review its extends before editing it. Run without -p to select local policy."));
+                result.advice.push("Add this exact name to environment.keep in .lilbox/profile.toml (preserve existing keep entries):".into());
+            } else {
+                result.advice.push(format!(
+                    "Add this exact name to environment.keep in {} (preserve existing keep entries):",
+                    loaded.selection()
+                ));
+            }
+            result
+                .advice
+                .extend(["[environment]".into(), format!("keep = [{input:?}]")]);
+        } else {
+            reasons.push("environment.inherit=true; no sensitive-name filter matches".into());
+        }
+    }
+    if !assigned {
+        result.advice.push(format!(
+            "Export {input} in the parent shell before launching; keep does not create a value."
+        ));
+    }
+    if matches!(
+        upper.as_str(),
+        "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "FTP_PROXY"
+    ) && !settings.keep_proxy_credentials
+    {
+        result.advice.push("Name-only answer: an inherited proxy URL containing userinfo is still removed. To pass it, set environment.keep_proxy_credentials = true (applies to all inherited proxy URLs).".into());
+    }
+    result.reason = reasons.join("; ");
+    Ok(result)
 }
 
 /// Explain one capability using the same resolved policy and environment as launch.
@@ -67,56 +208,7 @@ pub fn cani(
     let input = argument
         .ok_or_else(|| anyhow::anyhow!("this capability requires a path or environment name"))?;
     if matches!(capability, Capability::ReadEnv) {
-        if !environment::valid_name(input) {
-            bail!("expected an environment variable name, not an assignment");
-        }
-        // A sentinel source answers whether a name would be admitted even when
-        // the current parent does not have it. Mandatory normalization still wins.
-        let probe = environment::build(
-            &loaded.profile,
-            paths,
-            [(OsString::from(input), OsString::new())],
-        )?;
-        let allowed = probe.contains_key(std::ffi::OsStr::new(input));
-        let upper = input.to_ascii_uppercase();
-        let settings = &loaded.profile.environment;
-        let reason = if environment::injection_variable(&upper) {
-            "runtime injection variables are always removed".into()
-        } else if !loaded.profile.runtime.service_ipc
-            && environment::SERVICE_VARIABLES.contains(&upper.as_str())
-        {
-            "runtime.service_ipc=false removes this service pointer".into()
-        } else if matches!(input, "HOME" | "PWD" | "PATH" | "LILBOX") {
-            "mandatory launch normalization supplies this name".into()
-        } else if matches!(input, "TMPDIR" | "TMP" | "TEMP" | "OLDPWD") {
-            "launch normalization controls scratch/working-directory variables".into()
-        } else if let Some(pattern) = settings
-            .drop
-            .iter()
-            .find(|p| environment::matches_pattern(&upper, &p.to_ascii_uppercase()))
-        {
-            format!(
-                "environment.drop {pattern:?} [{}]",
-                loaded.origin("environment.drop", Some(pattern))
-            )
-        } else if settings.set.contains_key(input) {
-            format!(
-                "environment.set {input} [{}]; value hidden",
-                loaded.origin(&format!("environment.set.{input}"), None)
-            )
-        } else if let Some(pattern) = settings
-            .keep
-            .iter()
-            .find(|p| environment::matches_pattern(&upper, &p.to_ascii_uppercase()))
-        {
-            format!(
-                "environment.keep {pattern:?} [{}]; passed only if present in the parent",
-                loaded.origin("environment.keep", Some(pattern))
-            )
-        } else {
-            "environment inheritance and sensitive-name filtering; passed only if present in the parent".into()
-        };
-        return Ok(answer(allowed, reason));
+        return environment_answer(loaded, paths, input);
     }
     let aliases = resolve_path(input, paths)?;
     if let Some(deny) = policy
@@ -133,7 +225,7 @@ pub fn cani(
             .iter()
             .any(|p| ["/proc", "/dev", "/sys"].iter().any(|r| p.starts_with(r)))
     {
-        return Ok(Answer { allowed: None, reason: "Linux private runtime mounts have operation-specific permissions; inspect `lilbox policy`".into() });
+        return Ok(Answer { allowed: None, advice: Vec::new(), reason: "Linux private runtime mounts have operation-specific permissions; inspect `lilbox policy`".into() });
     }
     if policy.mode == Mode::Open {
         return Ok(answer(
@@ -172,7 +264,7 @@ pub fn cani(
             .iter()
             .any(|p| p == Path::new("/") || p.starts_with("/dev"))
     {
-        return Ok(Answer { allowed: None, reason: "basic runtime has operation-specific device/root permissions; inspect `lilbox policy`".into() });
+        return Ok(Answer { allowed: None, advice: Vec::new(), reason: "basic runtime has operation-specific device/root permissions; inspect `lilbox policy`".into() });
     }
     Ok(answer(
         false,
@@ -290,6 +382,13 @@ pub fn show(
         false,
     );
     scalar(&mut output, "profile path", loaded.selection(), "", false);
+    scalar(
+        &mut output,
+        "selection",
+        &loaded.selection_reason,
+        "",
+        false,
+    );
     scalar(
         &mut output,
         "Working directory",

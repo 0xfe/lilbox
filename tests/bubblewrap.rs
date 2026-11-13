@@ -442,3 +442,6 @@ sys.exit(os.waitstatus_to_exitcode(status))
 
 #[path = "support/hardening.rs"]
 mod hardening;
+
+#[path = "fixtures/doctor.rs"]
+mod doctor;

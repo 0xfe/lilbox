@@ -110,7 +110,8 @@ fn embedded_fallback_and_temp_overrides_remain_explicit() {
         temporary::select(&loaded.profile, &mut paths).unwrap(),
         temporary::Kind::Private
     );
-    config::init(&paths.config).unwrap();
+    fs::create_dir(&paths.config).unwrap();
+    fs::write(paths.config.join("default.toml"), config::DEFAULT_PROFILE).unwrap();
     assert!(loaded.revalidate().is_err());
     for (setting, expected) in [
         ("system", temporary::Kind::System),
@@ -123,35 +124,4 @@ fn embedded_fallback_and_temp_overrides_remain_explicit() {
         assert_eq!(temporary::select(&profile, &mut paths).unwrap(), expected);
     }
     assert!(!paths.cwd.join("scratch").exists());
-}
-
-/// Per-file initialization must not replace a neighboring file or accept traversal.
-#[test]
-fn initialization_selects_one_shipped_file() {
-    let root = tempfile::tempdir().unwrap();
-    config::init(root.path()).unwrap();
-    fs::write(root.path().join("isolated.toml"), "user custom").unwrap();
-    fs::write(root.path().join("default.toml"), "user custom").unwrap();
-    config::init_files(
-        root.path(),
-        config::InitMode::Overwrite,
-        &["default.toml".into()],
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read_to_string(root.path().join("isolated.toml")).unwrap(),
-        "user custom"
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("default.toml")).unwrap(),
-        config::DEFAULT_PROFILE
-    );
-    assert!(
-        config::init_files(
-            root.path(),
-            config::InitMode::Overwrite,
-            &["../outside".into()]
-        )
-        .is_err()
-    );
 }

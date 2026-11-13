@@ -33,9 +33,11 @@ the working directory is a grant root, not a detected Git repository root.
 | Component | Responsibility |
 | --- | --- |
 | [src/main.rs](../src/main.rs) | Clap CLI, embedded version, profile selection, launch context, command selection, startup display, error reporting. |
-| [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking, atomic initialization. |
+| [src/config.rs](../src/config.rs) | Strict TOML schema, recursive inheritance/merge, dependency tracking. |
 | [src/policy.rs](../src/policy.rs) | Portable policy, credential paths, expansion and filesystem alias resolution. |
 | [src/check.rs](../src/check.rs) | Read-only discovery, configuration diagnostics, precedence analysis, report output. |
+| [src/profiles.rs](../src/profiles.rs) | Global profile inventory, spelling suggestions, and atomic project scaffold creation. |
+| [src/doctor.rs](../src/doctor.rs) | Bounded real startup probe, configuration trust, and executable diagnostics with remedies. |
 | [src/discovery.rs](../src/discovery.rs) | Optional bounded filename-only project-secret inventory. |
 | [src/display.rs](../src/display.rs) | Terminal-safe colors, abbreviated notices, and native policy indentation. |
 | [src/inspect.rs](../src/inspect.rs) | Effective profile display with origins and static capability queries. |
@@ -48,12 +50,28 @@ the working directory is a grant root, not a detected Git repository root.
 | [src/trust.rs](../src/trust.rs) | Descriptor-backed profile identity, owner/mode checks, and pre-exec revalidation. |
 | [src/temporary.rs](../src/temporary.rs) | Read-only scratch selection and per-launch allocation. |
 | [src/launch.rs](../src/launch.rs) | Scratch directory validation, process hardening, Unix process replacement. |
-| [profiles/](../profiles/) | Embedded permissive/default/isolated profiles; the agent guide is embedded from docs/. |
+| [profiles/](../profiles/) | Embedded permissive/default/isolated profiles; the agent guide is bundled from docs/. |
 
 The library exposes these modules; the binary coordinates them. `anyhow` carries
 contextual errors, Clap parses arguments, Serde/TOML parse configuration, `tempfile`
-supports initialization, and `libc` supplies Unix launch operations. `Cargo.lock`
+provides private temporary storage, and `libc` supplies Unix launch operations. `Cargo.lock`
 is tracked because lilbox is an application.
+
+## Discovery, setup, and diagnostics
+
+- `profile list` enumerates global names plus embedded starters and the CWD-local
+  path, then uses the same selection resolver as launch. `LoadedProfile` retains
+  the precedence reason for list/show/doctor. Suggestions never alter selection.
+- `init --project` validates the parent, stages a complete mode-0600 TOML file,
+  and uses `persist_noclobber` to publish it. Existing entries and directory
+  symlinks fail. Global file installation remains in `install.sh`.
+- `doctor` re-enters the current executable with an empty environment and disposable
+  HOME/CWD/config, selecting embedded isolated policy and `/usr/bin/true`. This
+  uses ordinary launch hardening and backend descriptor ownership. File-backed
+  stderr avoids pipe deadlock; timeout kills/reaps the child; temporary files are
+  removed when the probe finishes. Configuration/executable checks are independent.
+- Environment queries use the launch filter with a sentinel, report matching rules
+  and provenance, and suggest exact-name changes. No environment values are logged.
 
 ## Launch flow
 
@@ -61,7 +79,6 @@ is tracked because lilbox is an application.
 flowchart TD
     CLI[Parse CLI] --> Action{Action}
     Action -->|No command| Help[Print help and exit]
-    Action -->|init| Init[Create missing example profiles]
     Action -->|Run or print policy| Config[Load and validate profile]
     Config --> Policy[Expand paths and resolve policy]
     Policy --> Env[Build sanitized environment]
@@ -81,11 +98,8 @@ flowchart TD
 2. `HOME` must be present and absolute. The configuration directory comes from
    `--config-dir`, otherwise nonempty absolute `XDG_CONFIG_HOME` plus `/lilbox`,
    otherwise `~/.config/lilbox`. Relative `--config-dir` paths use the launch CWD.
-3. `init` creates missing default/permissive/isolated profiles and AGENTS.md, then
-   prints the guide path. `--versioned` preserves alternatives; explicit
-   `--overwrite-profiles` atomically replaces regular shipped files. `check` (also `profile check`)
-   analyzes configurations and exits without executing a sandbox or creating
-   scratch storage. Neither command requires an OS execution backend.
+3. `check` (also `profile check`) analyzes configurations without executing a
+   sandbox or creating scratch storage. It requires no OS execution backend.
 4. Explicit `-p` selects a global profile; otherwise CWD/.lilbox/profile.toml
    takes precedence over default. No ancestor-directory search occurs. Local
    parents resolve globally. Load and validate the selected profile, resolve
@@ -104,7 +118,7 @@ flowchart TD
    name and source path (or embedded fallback), and actual command including shell startup flags. Complex arguments are
    quoted and terminal controls/non-UTF-8 bytes escaped for display only. Color
    requires a stderr terminal, no `NO_COLOR`, and a TERM other than `dumb`.
-   Launches also print the customization guide path. Inspection and configuration
+   The customization-guide prompt appears only in help. Inspection and configuration
    commands have no startup banner.
 7. On Unix, `CommandExt::exec` replaces lilbox with
    `/usr/bin/sandbox-exec -p <policy> -- <program> <args...>` or
@@ -133,17 +147,11 @@ absent. Default extends isolated. The binary embeds native files from
 `profiles/macos/` or `profiles/linux/`; permissive is shared. Invalid files,
 dangling symlinks, unsafe permissions, and unreadable sources fail.
 
-Initialization uses atomic temporary-file persistence:
-
-- Preserve: `persist_noclobber` writes missing profiles/guide only.
-- Versioned: write inactive `NAME.toml.VERSION`/`AGENTS.md.VERSION` alternatives.
-- Overwrite: replace regular shipped files; reject symlinks/special files.
-- `init --file NAME`: restrict the operation to selected shipped filenames.
-
-Custom named profiles are never part of initialization's write set.
-
-Updating the executable changes embedded defaults and shared enforcement rules.
-Existing active TOML is replaced only with explicit init/installer authorization.
+Profile installation belongs to the shell installer. It copies native profiles
+and the agent guide from the verified release archive, with per-file overwrite
+choices and inactive versioned alternatives. Custom named profiles are not part
+of its write set. Updating only the executable changes embedded fallbacks and
+shared enforcement rules; it does not replace active TOML files.
 
 `Mode`, `Network`, and resolved read/write/deny path sets form the portable policy.
 `BTreeSet` deduplicates paths and gives deterministic ordering. The environment
@@ -456,7 +464,7 @@ subsequent sandbox-launcher/target failures retain their own status.
 ## Verification and distribution
 
 Portable unit/CLI tests cover parsing, environment precedence, paths and aliases,
-temporary-directory validation, initialization, argument forwarding, help, and
+temporary-directory validation, argument forwarding, help, and
 version output. The host suite covers actual read/write restrictions, symlinks,
 ancestor renames, metadata precedence, TCP/Unix sockets, descendants, descriptors,
 exit/signals, and terminal behavior.
@@ -501,20 +509,20 @@ builds and archive checks pass. Its write-scoped final job creates the version t
 at the tested commit and publishes archives/checksums plus `install.sh`.
 
 The POSIX installer detects OS/architecture, resolves latest or a pinned stable
-version, verifies the downloaded checksum and embedded version, then atomically
-replaces the executable under the requested prefix. It invokes the installed
-binary's `init` command with the chosen overwrite/versioned mode and shared
-HOME/XDG resolution. Each existing shipped profile and AGENTS.md gets its own prompt
-through `/dev/tty` (stdin may carry the script). Declining or no usable terminal
-selects a versioned alternative for that file; `--overwrite-profiles` bypasses prompts.
-The installer detects `init --file` support; older binaries retain their compatible
-preserve/versioned behavior without a misleading per-file prompt. Initialization errors report a partial installation
-and a retry command. Progress messages show download, verification, copy, and
-initialization stages; successful installs show terminal-aware color, a box logo,
-config/executable locations, and usage/PATH guidance. It does not install sandbox
-backends. Installer regression tests use the built native executable and temporary
-homes to check preservation, replacement, versioned alternatives, and both prompt choices. See [development.md](development.md) for release
-and installer requirements.
+version, verifies the archive checksum, and stages its executable, native profiles,
+and guide. It validates the binary version before atomic replacement under the
+requested prefix. Profile files come directly from the archive, using shared
+HOME/XDG lookup. No executable command installs configuration.
+
+Each existing shipped file gets an individual prompt through `/dev/tty`. Decline
+or no terminal writes a versioned alternative; `--overwrite-profiles` explicitly
+replaces regular files. Same-directory staging provides complete files, with
+hard-link publication for new names and rename for approved replacements.
+Profile-copy failures report a partial install and return nonzero. Progress messages
+show the stages; completion prints a box logo, paths, PATH reminder, and coding-agent
+prompt. The installer does not install sandbox backends. Offline regression tests
+exercise native/legacy archive layouts, overwrite choices, symlinks, and failures.
+See [development.md](development.md) for details.
 
 `just release-installer` invokes `scripts/release-installer.sh` independently of
 GitHub binary publication. It stages and syntax-checks the local installer, uses
